@@ -12,13 +12,7 @@ services:
       - --api.dashboard=true
       - --api.insecure=false
       - --log.level=INFO
-      - --log.filepath=/logs/traefik.log
-      - --log.maxsize=10
-      - --log.maxage=14
-      - --log.maxbackups=5
-      - --log.compress=true
       - --accesslog=true
-      - --accesslog.filepath=/logs/access.log
     environment:
       TZ: ${TZ:-Europe/Bucharest}
     ports:
@@ -26,7 +20,6 @@ services:
       - "${TRAEFIK_DASHBOARD_PORT:-8082}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ${TRAEFIK_LOG_DIR:-/volume2/docker/traefik/logs}:/logs
     networks:
       - nas-net
     logging:
