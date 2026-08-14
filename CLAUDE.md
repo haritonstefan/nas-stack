@@ -7,7 +7,7 @@ Each stack is a **standalone, self-contained** `docker-compose.<tier>.yml` file 
 
 Flat folder, one compose file per tier:
 
-- **`docker-compose.core.yml`** — the foundational tier: `nas-net` network reference, Traefik (reverse proxy / routing), Homepage (dashboard). This is the LAN service-exposure backbone; every other stack depends on `nas-net` existing and on Traefik for routing, but core itself depends on nothing else.
+- **`docker-compose.core.yml`** — the foundational tier: defines/creates the `nas-net` network, Traefik (reverse proxy / routing), Homepage (dashboard). This is the LAN service-exposure backbone; every other stack depends on `nas-net` existing and on Traefik for routing, but core itself depends on nothing else.
 - `docker-compose.jellyfin.yml` — consumer stack
 - `docker-compose.arr.yml` (sonarr, radarr, prowlarr, torrent client — more \*arr services may be added later) — consumer stack, **not yet built**
 - `docker-compose.pihole.yml` — consumer stack, **not yet built**
@@ -30,9 +30,8 @@ Bring-up order: `core` first (creates routing/dashboard), then any consumer stac
 
 ## Networking
 
-- One external Docker network, `nas-net`, created once, outside of any compose file, before bringing up `core`:
-  `docker network create nas-net`
-- Every stack's compose file joins `nas-net` as an **external** network — this allows cross-stack, container-name-based resolution (e.g. Sonarr reaching Prowlarr by hostname).
+- One shared Docker network, `nas-net`, is defined and created by `docker-compose.core.yml` (not `external: true` there) — bringing up `core` creates it, so no manual `docker network create` step is needed.
+- Every consumer stack's compose file joins `nas-net` as an **external** network (it must already exist, created by `core`) — this allows cross-stack, container-name-based resolution (e.g. Sonarr reaching Prowlarr by hostname).
 - Do not use `network_mode: host` unless a specific service strictly requires it — prefer bridge + shared network so container-name resolution keeps working.
 
 ## Running a stack
@@ -40,8 +39,7 @@ Bring-up order: `core` first (creates routing/dashboard), then any consumer stac
 Compose does not read `<tier>.env` automatically — it must be passed explicitly, every time:
 
 ```
-docker network create nas-net   # once, before first `core` bring-up
-docker compose --env-file core.env -f docker-compose.core.yml up -d
+docker compose --env-file core.env -f docker-compose.core.yml up -d   # creates nas-net
 docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 ```
 
