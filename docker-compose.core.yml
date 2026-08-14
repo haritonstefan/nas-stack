@@ -1,0 +1,64 @@
+services:
+  traefik:
+    image: traefik:v3.1
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=nas-net
+      - --entrypoints.web.address=:80
+      - --entrypoints.dashboard.address=:8080
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --log.level=INFO
+      - --log.filepath=/logs/traefik.log
+      - --accesslog=true
+      - --accesslog.filepath=/logs/access.log
+    environment:
+      TZ: ${TZ}
+    ports:
+      - "${TRAEFIK_HTTP_PORT}:80"
+      - "${TRAEFIK_DASHBOARD_PORT}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${TRAEFIK_LOG_DIR}:/logs
+    networks:
+      - nas-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik-dashboard.rule=PathPrefix(`/`)
+      - traefik.http.routers.traefik-dashboard.entrypoints=dashboard
+      - traefik.http.routers.traefik-dashboard.service=api@internal
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:v1.13.2
+    container_name: homepage
+    restart: unless-stopped
+    depends_on:
+      - traefik
+    environment:
+      HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS}
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      - ${HOMEPAGE_CONFIG_DIR}:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - nas-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.homepage.rule=PathPrefix(`/`)
+      - traefik.http.routers.homepage.entrypoints=web
+      - traefik.http.routers.homepage.priority=1
+      - traefik.http.services.homepage.loadbalancer.server.port=3000
+      - homepage.group=Core
+      - homepage.name=Homepage
+      - homepage.icon=homepage.png
+      - homepage.href=http://apollo.local/
+      - homepage.description=Service dashboard
+
+networks:
+  nas-net:
+    external: true
