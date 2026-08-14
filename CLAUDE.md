@@ -9,8 +9,8 @@ Flat folder, one compose file per tier:
 
 - **`docker-compose.core.yml`** — the foundational tier: `nas-net` network reference, Traefik (reverse proxy / routing), Homepage (dashboard). This is the LAN service-exposure backbone; every other stack depends on `nas-net` existing and on Traefik for routing, but core itself depends on nothing else.
 - `docker-compose.jellyfin.yml` — consumer stack
-- `docker-compose.arr.yml` (sonarr, radarr, prowlarr, torrent client — more \*arr services may be added later) — consumer stack
-- `docker-compose.pihole.yml` — consumer stack
+- `docker-compose.arr.yml` (sonarr, radarr, prowlarr, torrent client — more \*arr services may be added later) — consumer stack, **not yet built**
+- `docker-compose.pihole.yml` — consumer stack, **not yet built**
 
 Each stack has a matching `.env.example` (e.g. `core.env.example`) documenting required variables. Actual `.env` files are gitignored.
 
@@ -61,9 +61,10 @@ docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 ## Conventions for compose files
 
 - Minimal comments. Be verbose at the configuration level instead (explicit env vars, explicit port mappings, explicit volume paths, restart policies, healthchecks where sensible) rather than relying on image defaults.
-- Every service pinned to an explicit image tag — never `:latest`.
-- Every service: explicit `container_name`, explicit `restart` policy, explicit volume mounts (config vs data/media separated per the volume layout above), explicit `networks: [nas-net]`.
+- Every service pinned to an explicit image tag, exact patch version — never `:latest`, never a floating minor/major tag.
+- Every service: explicit `container_name`, explicit `restart` policy, explicit volume mounts (config vs data/media separated per the volume layout above), explicit `networks: [nas-net]`, explicit `logging:` limits (`json-file`, `max-size: "10m"`, `max-file: "5"`) so container logs can't grow unbounded on the SSD volume.
 - Config/log data for a service lives under `/volume2/docker/<service>/...`; media libraries are mounted read-only where the service only needs to read (e.g. Jellyfin) and read-write where it needs to manage files (e.g. \*arr apps).
+- Every `${VAR}` interpolation in a compose file has a `:-default` fallback matching that stack's `.env.example`, since most values aren't sensitive — the stack should come up correctly even if `--env-file` is forgotten. Only genuinely sensitive values (credentials, API keys) should be left without a default so a missing `.env` fails loudly instead of silently using a bogus secret.
 
 ## Jellyfin
 

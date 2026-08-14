@@ -3,25 +3,30 @@ services:
     image: jellyfin/jellyfin:10.11.11
     container_name: jellyfin
     restart: unless-stopped
-    user: "${PUID}:${PGID}"
+    user: "${PUID:-1000}:${PGID:-10}"
     group_add:
-      - "${RENDER_GID}"
+      - "${RENDER_GID:-105}"
     environment:
-      TZ: ${TZ}
+      TZ: ${TZ:-Europe/Bucharest}
     volumes:
-      - ${JELLYFIN_CONFIG_DIR}:/config
-      - ${JELLYFIN_CACHE_DIR}:/cache
-      - ${MEDIA_MOVIES_DIR}:/media/movies:ro
-      - ${MEDIA_SERIES_DIR}:/media/series:ro
-      - ${MEDIA_MUSIC_DIR}:/media/music:ro
+      - ${JELLYFIN_CONFIG_DIR:-/volume2/docker/jellyfin/config}:/config
+      - ${JELLYFIN_CACHE_DIR:-/volume2/docker/jellyfin/cache}:/cache
+      - ${MEDIA_MOVIES_DIR:-/volume1/Media/Movies}:/media/movies:ro
+      - ${MEDIA_SERIES_DIR:-/volume1/Media/Series}:/media/series:ro
+      - ${MEDIA_MUSIC_DIR:-/volume1/Media/Music}:/media/music:ro
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
     ports:
-      - "${JELLYFIN_HTTP_PORT}:8096"
-      - "${JELLYFIN_DISCOVERY_PORT}:7359/udp"
-      - "${JELLYFIN_DLNA_PORT}:1900/udp"
+      - "${JELLYFIN_HTTP_PORT:-8096}:8096"
+      - "${JELLYFIN_DISCOVERY_PORT:-7359}:7359/udp"
+      - "${JELLYFIN_DLNA_PORT:-1900}:1900/udp"
     networks:
       - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     labels:
       - traefik.enable=true
       - traefik.http.routers.jellyfin.rule=PathPrefix(`/jellyfin`)
