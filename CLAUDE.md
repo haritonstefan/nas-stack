@@ -19,6 +19,7 @@ Bring-up order: `core` first (creates routing/dashboard), then any consumer stac
 ## Host environment facts
 
 - NAS: UGreen, UGOS, Docker + Docker Compose available, SSH access.
+- Docker daemon API version on this NAS: `1.54` (confirm via `docker version --format '{{.Server.APIVersion}}'` if it ever changes after a UGOS update). Traefik versions before v3.6.16 fail against this daemon with `client version 1.24 is too old` — the fix was upgrading Traefik (currently pinned to `v3.7.10`), not pinning `DOCKER_API_VERSION`; modern Traefik negotiates the API version with the daemon automatically. If a future service hits the same error, prefer upgrading that service's image first before reaching for a `DOCKER_API_VERSION` override.
 - Volumes:
   - `/volume1/Media/{Movies,Series,Music}` — HDD, media storage only.
   - `/volume2/docker` — SSD, holds all container configs, logs, and this repo. Nothing that causes idle HDD spin-up lives here.
