@@ -1,0 +1,38 @@
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.11.11
+    container_name: jellyfin
+    restart: unless-stopped
+    user: "${PUID}:${PGID}"
+    group_add:
+      - "${RENDER_GID}"
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - ${JELLYFIN_CONFIG_DIR}:/config
+      - ${JELLYFIN_CACHE_DIR}:/cache
+      - ${MEDIA_MOVIES_DIR}:/media/movies:ro
+      - ${MEDIA_SERIES_DIR}:/media/series:ro
+      - ${MEDIA_MUSIC_DIR}:/media/music:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    ports:
+      - "${JELLYFIN_HTTP_PORT}:8096"
+      - "${JELLYFIN_DISCOVERY_PORT}:7359/udp"
+      - "${JELLYFIN_DLNA_PORT}:1900/udp"
+    networks:
+      - nas-net
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.jellyfin.rule=PathPrefix(`/jellyfin`)
+      - traefik.http.routers.jellyfin.entrypoints=web
+      - traefik.http.services.jellyfin.loadbalancer.server.port=8096
+      - homepage.group=Media
+      - homepage.name=Jellyfin
+      - homepage.icon=jellyfin.png
+      - homepage.href=http://apollo.local/jellyfin
+      - homepage.description=Media server
+
+networks:
+  nas-net:
+    external: true

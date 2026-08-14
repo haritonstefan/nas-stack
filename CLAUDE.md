@@ -65,6 +65,19 @@ docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 - Every service: explicit `container_name`, explicit `restart` policy, explicit volume mounts (config vs data/media separated per the volume layout above), explicit `networks: [nas-net]`.
 - Config/log data for a service lives under `/volume2/docker/<service>/...`; media libraries are mounted read-only where the service only needs to read (e.g. Jellyfin) and read-write where it needs to manage files (e.g. \*arr apps).
 
+## Jellyfin
+
+- Bridge network (`nas-net`), not `network_mode: host` — consistent with the networking convention above. Direct access ports are published explicitly instead: `8096` (HTTP/web), `7359/udp` (auto-discovery broadcast), `1900/udp` (DLNA — confirmed free; UGOS's own DLNA/SSDP responder was intentionally disabled on this NAS in favor of Jellyfin's).
+- Hardware transcoding: Intel iGPU passthrough via `/dev/dri/renderD128` + `group_add: [\"${RENDER_GID}\"]`. `RENDER_GID` is host-specific — found via `getent group render | cut -d: -f3` over SSH (confirmed `105` on this NAS). `user: \"${PUID}:${PGID}\"` matches the rest of the stack. Before first `up`, confirm the device node exists: `ls -l /dev/dri` should show `renderD128`.
+- Storage split: `/config` and `/cache` on `/volume2/docker/jellyfin/...` (SSD); `/media/{movies,series,music}` mounted `:ro` from `/volume1/Media/...` (HDD) — Jellyfin never writes to media, all metadata/subtitle writes land in `/config`. Transcode temp files default to `/cache/transcodes` inside the container (no separate mount needed) — already on the SSD via the `/cache` mount, satisfying the "don't spin up the HDD" goal without extra config.
+- **Prerequisite**: bind-mount source directories are NOT auto-created with correct ownership. Before first `up`, on the NAS: `mkdir -p /volume2/docker/jellyfin/{config,cache}` then `chown -R 1000:10` those paths — otherwise the container (running as `1000:10` via `user:`) can't write `/config` and fails.
+- **Required manual post-first-boot steps** (in order):
+  1. First bring-up must be reached via the **direct port**, `apollo.local:8096` — the path route `apollo.local/jellyfin` does not work yet at this point.
+  2. Complete the Jellyfin setup wizard at `apollo.local:8096`.
+  3. Dashboard → Advanced → Networking → Base URL → set to `/jellyfin`, then restart the container. Base URL is not an env var or compose setting — Traefik's `PathPrefix(\`/jellyfin\`)` label only works once Jellyfin itself is told to expect that prefix (no `stripprefix` middleware is used; the path is passed through unchanged). After this, `apollo.local/jellyfin` works.
+  4. To use Jellyfin as the LAN's DLNA server (in place of UGOS's, which was disabled for this): Dashboard → Plugins → Catalog → install the DLNA plugin (built into core before v10.10, a separate plugin since). Plugins install through this same UI — nothing to pre-bake into the compose file.
+- Exposed both ways per your choice: through Traefik (`apollo.local/jellyfin`, path-based, after Base URL is set) and directly (`apollo.local:8096`) — the direct port matters for native/TV client auto-discovery (UDP broadcast to Jellyfin's own port, not the reverse proxy) and is required for the initial setup wizard.
+
 ## Open / future items
 
 - More \*arr services (e.g. bazarr, lidarr) may be added to the arr stack — keep that compose file structured so adding a service is a simple copy-paste block.
