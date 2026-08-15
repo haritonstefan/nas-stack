@@ -174,7 +174,10 @@ esac
 compose_up() {
   local tier="$1"
   say "Starting ${tier} stack"
-  run docker compose --env-file "${tier}.env" -f "docker-compose.${tier}.yml" up -d
+  # -p per tier: without it every stack shares the directory-derived project
+  # name, and each `up` reports the other stack's containers as orphans.
+  run docker compose -p "nas-${tier}" --env-file "${tier}.env" \
+    -f "docker-compose.${tier}.yml" up -d
 }
 
 # core first: it defines nas-net, which every other stack joins as external.
@@ -225,12 +228,24 @@ case " $STACKS " in
       if [ "$DRY_RUN" -eq 1 ]; then
         ./jellyfin-bootstrap.sh --dry-run 2>&1 | sed 's/^/    /' || true
       else
-        ./jellyfin-bootstrap.sh
-        # The bootstrap sets BaseUrl as its final call; it needs a restart to
-        # take effect. Doing it here keeps the whole flow to one command.
-        say "Restarting Jellyfin to apply the base URL"
-        run docker restart jellyfin >/dev/null
-        info "restarted"
+        # Exit 10 means it changed BaseUrl and a restart is needed; 0 means
+        # nothing to activate. Anything else is a real failure.
+        BOOTSTRAP_RC=0
+        ./jellyfin-bootstrap.sh || BOOTSTRAP_RC=$?
+        case "$BOOTSTRAP_RC" in
+          0)
+            info "no restart needed"
+            ;;
+          10)
+            say "Restarting Jellyfin to apply the base URL"
+            run docker restart jellyfin >/dev/null
+            info "restarted"
+            ;;
+          *)
+            echo "ERROR: jellyfin-bootstrap.sh failed (exit ${BOOTSTRAP_RC})." >&2
+            exit "$BOOTSTRAP_RC"
+            ;;
+        esac
       fi
     fi
     ;;

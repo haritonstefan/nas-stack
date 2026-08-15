@@ -81,15 +81,34 @@ fi
 
 echo "==> Waiting for Jellyfin at ${JELLYFIN_URL}"
 if [ "$DRY_RUN" -eq 0 ]; then
-  for i in $(seq 1 60); do
-    curl -fsS "${JELLYFIN_URL}/System/Info/Public" >/dev/null 2>&1 && break
-    if [ "$i" -eq 60 ]; then
-      echo "ERROR: Jellyfin unreachable after 120s." >&2
+  # An instance that already has BaseUrl set serves its whole API under that
+  # prefix, so probe both roots and adopt whichever actually answers. Without
+  # this, a re-run against a configured server 503s on the first wizard call.
+  BASE_STRIPPED="${JELLYFIN_URL%/}"
+  BASE_STRIPPED="${BASE_STRIPPED%"${JELLYFIN_BASE_URL}"}"
+  PROBE_INFO=""
+  for i in $(seq 1 90); do
+    for candidate in "$BASE_STRIPPED" "${BASE_STRIPPED}${JELLYFIN_BASE_URL}"; do
+      # /System/Info/Public is unauthenticated and only 200s once the server is
+      # genuinely serving requests — a plain TCP connect is not enough, since
+      # Jellyfin accepts connections well before it finishes starting.
+      if PROBE_INFO=$(curl -fsS --max-time 5 "${candidate}/System/Info/Public" 2>/dev/null) \
+         && printf '%s' "$PROBE_INFO" | jq -e '.Version' >/dev/null 2>&1; then
+        JELLYFIN_URL="$candidate"
+        break 2
+      fi
+    done
+    if [ "$i" -eq 90 ]; then
+      echo "ERROR: Jellyfin did not answer at ${BASE_STRIPPED} or" >&2
+      echo "       ${BASE_STRIPPED}${JELLYFIN_BASE_URL} after 180s." >&2
+      echo "       Check: docker logs jellyfin" >&2
       exit 1
     fi
     sleep 2
   done
-  WIZARD_DONE=$(curl -fsS "${JELLYFIN_URL}/System/Info/Public" | jq -r '.StartupWizardCompleted // false')
+  info_line=$(printf '%s' "$PROBE_INFO" | jq -r '"\(.ServerName // "?") \(.Version // "?")"')
+  echo "    reachable at ${JELLYFIN_URL} (${info_line})"
+  WIZARD_DONE=$(printf '%s' "$PROBE_INFO" | jq -r '.StartupWizardCompleted // false')
 else
   WIZARD_DONE=false
 fi
@@ -236,6 +255,11 @@ else
   RESTART_NEEDED=1
 fi
 
+# JELLYFIN_URL may already carry the prefix (detected above), so strip before
+# re-appending rather than doubling it up.
+DIRECT_URL="${JELLYFIN_URL%/}"
+DIRECT_URL="${DIRECT_URL%"${JELLYFIN_BASE_URL}"}${JELLYFIN_BASE_URL}"
+
 cat <<EOF
 
 ==> Done.
@@ -248,8 +272,13 @@ EOF
 fi
 cat <<EOF
     Traefik: http://apollo.local${JELLYFIN_BASE_URL}
-    Direct:  ${JELLYFIN_URL}${JELLYFIN_BASE_URL}
+    Direct:  ${DIRECT_URL}
 
     Still manual: Dashboard -> Plugins -> Catalog -> DLNA (if you want Jellyfin
     to serve DLNA in place of UGOS's disabled responder).
 EOF
+
+# Exit 10 = success, and a restart is required. Lets up.sh restart only when
+# something actually changed, instead of bouncing the container on every re-run.
+[ "${RESTART_NEEDED}" -eq 1 ] && exit 10
+exit 0

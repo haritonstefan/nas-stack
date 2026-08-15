@@ -18,6 +18,7 @@ Two scripts sit alongside the compose files:
 
 - **`up.sh`** — the entry point. Fresh-clone-to-running in one command; see "Running a stack" below.
 - **`jellyfin-bootstrap.sh`** — configures Jellyfin over its API (wizard, admin user, libraries, QSV, base URL). Called by `up.sh`, but standalone and idempotent, so it can be re-run on its own.
+- **`down.sh`** — the inverse of `up.sh`: stops both stacks, removes `nas-net`, and deletes `/volume2/docker/{traefik,homepage,jellyfin}`. See "Tearing down" below.
 
 Bring-up order: `core` first (creates routing/dashboard), then any consumer stack, in any order.
 
@@ -53,12 +54,36 @@ It checks prerequisites, creates `<tier>.env` from each `.example` (never overwr
 
 **Run it as root** (or a user that can `chown` into `/volume2/docker`) — ownership is skipped with a notice otherwise, and Jellyfin then fails to write `/config`. The one interactive prompt is the Jellyfin admin password when `JELLYFIN_ADMIN_PASSWORD` is unset; it's written back to `jellyfin.env` with `chmod 600`. Warnings (missing media dirs, missing `/dev/dri/renderD128`, a `RENDER_GID` that doesn't match the host's render group) are non-fatal by design so a partial setup still comes up.
 
-Underneath it's plain compose — Compose does not read `<tier>.env` automatically, so it must be passed explicitly every time:
+Underneath it's plain compose — Compose does not read `<tier>.env` automatically, so it must be passed explicitly every time. Each tier also gets its **own project name** (`-p nas-<tier>`): all the compose files share one directory, so without it they collapse into a single directory-derived project and every `up` reports the other stack's containers as orphans.
 
 ```
-docker compose --env-file core.env -f docker-compose.core.yml up -d   # creates nas-net
-docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
+docker compose -p nas-core --env-file core.env -f docker-compose.core.yml up -d   # creates nas-net
+docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 ```
+
+Containers created before the `-p` convention live under the old project name; `docker compose -f <file> down` them once (or just `docker rm -f`) and re-run `up.sh` to re-adopt them. `container_name` is explicit on every service, so names don't change either way.
+
+## Tearing down
+
+`./down.sh` reverses `up.sh` — stops both stacks, removes `nas-net`, and deletes the persistent config under `/volume2/docker`.
+
+```
+./down.sh                 # dry run (the default) — lists what would go, with sizes
+sudo ./down.sh --yes      # actually do it; prompts once, type "delete" to confirm
+sudo ./down.sh --containers   # stop/remove containers only, keep all data
+sudo ./down.sh --yes jellyfin # scope to one stack
+```
+
+**A dry run is the default** — `--yes` is required to change anything, and deleting data additionally needs an interactive `delete` confirmation (`--force` bypasses it for scripted use, and without a TTY the script refuses rather than assuming consent).
+
+Safety invariants worth preserving if this script is ever edited:
+
+- **Nothing outside `/volume2/docker` can be deleted.** Every path is validated against that root and rejected if it escapes, contains `..`, or resolves to the root itself. This matters because `MEDIA_*_DIR` (pointing at `/volume1/Media`) lives in the same `.env` file as the delete targets — a typo there must not be able to reach the media library. Verified by pointing `JELLYFIN_CONFIG_DIR` at `/` and `HOMEPAGE_CONFIG_DIR` at `/volume1/Media/Movies`: both are refused and dropped from the plan.
+- **Media is never in the blast radius** — `/volume1/Media/*` is explicitly listed under "NOT touched" in the plan output.
+- **`.env` files survive** a teardown, so `up.sh` afterwards doesn't re-prompt for the Jellyfin admin password. Delete them by hand for a truly clean slate.
+- Stacks come down **jellyfin-first, core-last**, since core owns `nas-net` and consumers join it as external — the reverse order leaves the network in use. Stray containers predating the `-p nas-<tier>` convention are then removed by name.
+
+Everything Jellyfin knows — users, libraries, watch state, downloaded metadata — is in `/volume2/docker/jellyfin` and does not survive a full teardown. Re-running `up.sh` afterwards rebuilds it from scratch via `jellyfin-bootstrap.sh`.
 
 ## Routing (Traefik) and dashboard (Homepage) — both in `docker-compose.core.yml`
 
