@@ -20,7 +20,16 @@
 set -euo pipefail
 
 DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+VERBOSE=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run)      DRY_RUN=1 ;;
+    -v|--verbose)   VERBOSE=1 ;;
+    *) echo "Unknown argument: ${arg}" >&2
+       echo "Usage: ./jellyfin-bootstrap.sh [--dry-run] [--verbose]" >&2
+       exit 1 ;;
+  esac
+done
 
 ENV_FILE="${ENV_FILE:-jellyfin.env}"
 if [ -f "$ENV_FILE" ]; then
@@ -58,7 +67,9 @@ urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 api() {
   # api <method> <path> [json-body]
   local method="$1" path="$2" body="${3:-}"
-  local -a args=(-fsS -X "$method" "${JELLYFIN_URL}${path}" -H 'Content-Type: application/json')
+  # No -f: it discards the response body on HTTP errors, which is exactly where
+  # Jellyfin explains itself. Status is captured separately instead.
+  local -a args=(-sS -X "$method" "${JELLYFIN_URL}${path}" -H 'Content-Type: application/json')
 
   # Jellyfin wants the token inside the MediaBrowser authorization scheme.
   local auth='MediaBrowser Client="nas-stack", Device="bootstrap", DeviceId="nas-stack-bootstrap", Version="1.0.0"'
@@ -72,17 +83,42 @@ api() {
     echo '{}'
     return 0
   fi
-  # curl -f exits non-zero on HTTP >=400 but prints nothing useful about which
-  # call failed. Name the method and path on stderr before propagating, so a
-  # failure points straight at the endpoint instead of just an exit code.
-  local rc=0 out
-  out=$(curl "${args[@]}") || rc=$?
+
+  if [ "$VERBOSE" -eq 1 ]; then
+    echo "    --> ${method} ${JELLYFIN_URL}${path}" >&2
+    [ -n "$body" ] && printf '        body: %s\n' \
+      "$(printf '%s' "$body" | jq -c '(.Password? // empty) |= "***"' 2>/dev/null || echo '<unprintable>')" >&2
+  fi
+
+  # Append the status as a trailing line so body and code come back together.
+  local raw rc=0 status out
+  raw=$(curl "${args[@]}" -w $'\n%{http_code}') || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "ERROR: ${method} ${JELLYFIN_URL}${path} failed (curl exit ${rc})" >&2
-    [ -n "$body" ] && printf '       body: %s\n' "$(printf '%s' "$body" | jq -c . 2>/dev/null || printf '%s' "$body")" >&2
+    echo "ERROR: ${method} ${JELLYFIN_URL}${path} — curl failed (exit ${rc})" >&2
     return "$rc"
   fi
-  printf '%s' "$out"
+  status="${raw##*$'\n'}"
+  out="${raw%$'\n'*}"
+
+  [ "$VERBOSE" -eq 1 ] && echo "    <-- ${status} ($(printf '%s' "$out" | wc -c | tr -d ' ') bytes)" >&2
+
+  case "$status" in
+    2*) printf '%s' "$out"; return 0 ;;
+  esac
+
+  # A failing status is the whole point of the exercise — print what the server
+  # actually said, not just the number.
+  echo "ERROR: ${method} ${JELLYFIN_URL}${path} returned HTTP ${status}" >&2
+  if [ -n "$body" ]; then
+    printf '       sent: %s\n' \
+      "$(printf '%s' "$body" | jq -c '(.Password? // empty) |= "***"' 2>/dev/null || printf '%s' "$body")" >&2
+  fi
+  if [ -n "$out" ]; then
+    printf '       said: %s\n' "$(printf '%s' "$out" | head -c 500)" >&2
+  else
+    printf '       said: <empty body>\n' >&2
+  fi
+  return 22
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -119,6 +155,10 @@ if [ "$DRY_RUN" -eq 0 ]; then
   info_line=$(printf '%s' "$PROBE_INFO" | jq -r '"\(.ServerName // "?") \(.Version // "?")"')
   echo "    reachable at ${JELLYFIN_URL} (${info_line})"
   WIZARD_DONE=$(printf '%s' "$PROBE_INFO" | jq -r '.StartupWizardCompleted // false')
+  # StartupWizardCompleted gates the whole /Startup/* surface: once true, those
+  # routes stop being mapped and return 404 rather than 403.
+  [ "$VERBOSE" -eq 1 ] && printf '    StartupWizardCompleted=%s\n%s\n' "$WIZARD_DONE" \
+    "$(printf '%s' "$PROBE_INFO" | jq -c . | sed 's/^/    /')" >&2
 else
   WIZARD_DONE=false
 fi

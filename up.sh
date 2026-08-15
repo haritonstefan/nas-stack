@@ -22,22 +22,25 @@ configured.
   sudo ./up.sh core             # only the core stack
   sudo ./up.sh jellyfin         # only the jellyfin stack (+ bootstrap)
   sudo ./up.sh --no-bootstrap   # bring stacks up, skip Jellyfin API config
+  sudo ./up.sh --verbose        # log every Jellyfin API request and response
 EOF
 }
 
 DRY_RUN=0
 RUN_BOOTSTRAP=1
+VERBOSE=0
 STACKS=""
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run)      DRY_RUN=1 ;;
     --no-bootstrap) RUN_BOOTSTRAP=0 ;;
+    -v|--verbose)   VERBOSE=1 ;;
     core|jellyfin)  STACKS="${STACKS} ${arg}" ;;
     -h|--help)      usage; exit 0 ;;
     *)
       echo "Unknown argument: ${arg}" >&2
-      echo "Usage: ./up.sh [--dry-run] [--no-bootstrap] [core] [jellyfin]" >&2
+      echo "Usage: ./up.sh [--dry-run] [--verbose] [--no-bootstrap] [core] [jellyfin]" >&2
       exit 1 ;;
   esac
 done
@@ -260,13 +263,19 @@ if want jellyfin; then
   else
     say "Configuring Jellyfin"
     export JELLYFIN_ADMIN_PASSWORD="${JELLYFIN_ADMIN_PASSWORD:-}"
+    BOOTSTRAP_ARGS=""
+    [ "$VERBOSE" -eq 1 ] && BOOTSTRAP_ARGS="--verbose"
     if [ "$DRY_RUN" -eq 1 ]; then
-      ./jellyfin-bootstrap.sh --dry-run 2>&1 | sed 's/^/    /' || true
+      # shellcheck disable=SC2086
+      ./jellyfin-bootstrap.sh --dry-run $BOOTSTRAP_ARGS 2>&1 | sed 's/^/    /' || true
     else
+      # Not piped: keeps stdout/stderr separate and unbuffered, so a failure's
+      # diagnostics arrive in the right order for debugging.
       # Exit 10 means it changed BaseUrl and a restart is needed; 0 means
       # nothing to activate. Anything else is a real failure.
       BOOTSTRAP_RC=0
-      ./jellyfin-bootstrap.sh || BOOTSTRAP_RC=$?
+      # shellcheck disable=SC2086
+      ./jellyfin-bootstrap.sh $BOOTSTRAP_ARGS || BOOTSTRAP_RC=$?
       case "$BOOTSTRAP_RC" in
         0)  info "no restart needed" ;;
         10) say "Restarting Jellyfin to apply the base URL"
