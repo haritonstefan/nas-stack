@@ -4,7 +4,7 @@
 #
 # DESTRUCTIVE. Everything Jellyfin knows — users, libraries, watch state,
 # metadata — lives in /volume2/docker/jellyfin and does not survive this.
-# Media under /volume1/Media is never touched.
+# Nothing outside /volume2/docker is ever deleted.
 #
 #   ./down.sh                 # dry run: shows exactly what would be removed
 #   ./down.sh --yes           # actually do it (prompts once for confirmation)
@@ -30,7 +30,7 @@ for arg in "$@"; do
     --containers)   CONTAINERS_ONLY=1 ;;
     core|jellyfin)  STACKS="${STACKS} ${arg}" ;;
     -h|--help)
-      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *)
       echo "Unknown argument: ${arg}" >&2
@@ -62,9 +62,9 @@ command -v docker >/dev/null 2>&1 || { echo "ERROR: docker is required." >&2; ex
 
 # --- what would be deleted ---------------------------------------------------
 
-# Only paths under this root may ever be removed. /volume1/Media lives in the
-# same env file as the targets below, so a typo there must not be able to reach
-# the media library.
+# Only real subdirectories of this root may ever be removed. The paths below
+# come from a sourced .env, so a mistyped or empty value must not be able to
+# expand into something outside it.
 SAFE_ROOT="/volume2/docker"
 
 DELETE_PATHS=""
@@ -86,7 +86,7 @@ esac
 CHECKED_PATHS=""
 for p in $DELETE_PATHS; do
   # Refuse anything that isn't a real subdirectory of SAFE_ROOT: catches an
-  # empty var expanding to "/", a stray "..", and the media volume.
+  # empty var expanding to "/", a stray "..", and SAFE_ROOT itself.
   case "$p" in
     "${SAFE_ROOT}"/?*) ;;
     *)
@@ -132,11 +132,7 @@ else
     done
   fi
   say "NOT touched"
-  for d in "${MEDIA_MOVIES_DIR:-/volume1/Media/Movies}" \
-           "${MEDIA_SERIES_DIR:-/volume1/Media/Series}" \
-           "${MEDIA_MUSIC_DIR:-/volume1/Media/Music}"; do
-    info "${d}"
-  done
+  info "anything outside ${SAFE_ROOT}"
   info "core.env / jellyfin.env (delete by hand if you want a truly clean slate)"
 fi
 

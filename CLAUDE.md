@@ -78,8 +78,7 @@ sudo ./down.sh --yes jellyfin # scope to one stack
 
 Safety invariants worth preserving if this script is ever edited:
 
-- **Nothing outside `/volume2/docker` can be deleted.** Every path is validated against that root and rejected if it escapes, contains `..`, or resolves to the root itself. This matters because `MEDIA_*_DIR` (pointing at `/volume1/Media`) lives in the same `.env` file as the delete targets — a typo there must not be able to reach the media library. Verified by pointing `JELLYFIN_CONFIG_DIR` at `/` and `HOMEPAGE_CONFIG_DIR` at `/volume1/Media/Movies`: both are refused and dropped from the plan.
-- **Media is never in the blast radius** — `/volume1/Media/*` is explicitly listed under "NOT touched" in the plan output.
+- **Nothing outside `/volume2/docker` can be deleted.** Every path is validated against that root and rejected if it escapes, contains `..`, or resolves to the root itself — the delete targets come from a sourced `.env`, so a mistyped or empty value must not be able to expand into something outside it. Verified by pointing `JELLYFIN_CONFIG_DIR` at `/` and `HOMEPAGE_CONFIG_DIR` at `/volume1/Media/Movies`: both are refused and dropped from the plan. The plan's "NOT touched" section states this as the root-level invariant; it deliberately does **not** enumerate media paths — `down.sh` has no business reading `MEDIA_*_DIR` at all, and listing them made the script read as if media were in scope.
 - **`.env` files survive** a teardown, so `up.sh` afterwards doesn't re-prompt for the Jellyfin admin password. Delete them by hand for a truly clean slate.
 - Stacks come down **jellyfin-first, core-last**, since core owns `nas-net` and consumers join it as external — the reverse order leaves the network in use. Stray containers predating the `-p nas-<tier>` convention are then removed by name.
 
