@@ -72,7 +72,17 @@ api() {
     echo '{}'
     return 0
   fi
-  curl "${args[@]}"
+  # curl -f exits non-zero on HTTP >=400 but prints nothing useful about which
+  # call failed. Name the method and path on stderr before propagating, so a
+  # failure points straight at the endpoint instead of just an exit code.
+  local rc=0 out
+  out=$(curl "${args[@]}") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "ERROR: ${method} ${JELLYFIN_URL}${path} failed (curl exit ${rc})" >&2
+    [ -n "$body" ] && printf '       body: %s\n' "$(printf '%s' "$body" | jq -c . 2>/dev/null || printf '%s' "$body")" >&2
+    return "$rc"
+  fi
+  printf '%s' "$out"
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
