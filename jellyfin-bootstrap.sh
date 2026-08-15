@@ -49,6 +49,9 @@ JELLYFIN_METADATA_LANGUAGE="${JELLYFIN_METADATA_LANGUAGE:-en}"
 # when a title has no data for this one. Overridable per-library in the UI.
 JELLYFIN_METADATA_COUNTRY="${JELLYFIN_METADATA_COUNTRY:-US}"
 JELLYFIN_UI_CULTURE="${JELLYFIN_UI_CULTURE:-en-US}"
+# Set to 0 to skip the initial scan — it walks the whole media HDD, so on a
+# large library it is long and disk-heavy. Re-runs re-trigger it.
+JELLYFIN_SCAN_ON_BOOTSTRAP="${JELLYFIN_SCAN_ON_BOOTSTRAP:-1}"
 
 for cmd in curl jq; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd is required." >&2; exit 1; }
@@ -175,7 +178,15 @@ if [ "$WIZARD_DONE" = "false" ]; then
       PreferredMetadataLanguage: $lang, MetadataCountryCode: $country}')" >/dev/null
   echo "    server name: ${JELLYFIN_SERVER_NAME}"
 
-  # Updates the auto-created first user rather than adding a new one.
+  # REQUIRED before the POST below, not just a read: GetFirstUser() calls
+  # _userManager.InitializeAsync(), which lazily creates the default user.
+  # UpdateStartupUser() only *updates* an existing one — it returns 404 outright
+  # if GetFirstUser() comes back null. On a fresh config nothing else creates
+  # that user, so skipping this GET makes the next call fail on a clean install
+  # while working on any server where the wizard UI was ever opened.
+  api GET /Startup/User >/dev/null
+
+  # Renames the now-initialized first user and sets its password.
   api POST /Startup/User "$(jq -n \
     --arg name "$JELLYFIN_ADMIN_USER" \
     --arg pass "$JELLYFIN_ADMIN_PASSWORD" \
@@ -288,6 +299,18 @@ api POST /System/Configuration/encoding "$(printf '%s' "$ENC" | jq \
    | .EnableIntelLowPowerHevcHwEncoder = true
    | .HardwareDecodingCodecs = ["h264","vc1","vp8","hevc","mpeg2video","vp9"]')" >/dev/null
 echo "    QSV on /dev/dri/renderD128"
+
+echo "==> Triggering library scan"
+# Libraries are created with refreshLibrary=false, so this is the first scan.
+# Must come BEFORE the base URL change — that is the last call against the bare
+# root. Returns 204 immediately; the scan itself runs in the background, so this
+# kicks it off rather than waiting for it.
+if [ "$JELLYFIN_SCAN_ON_BOOTSTRAP" = "1" ]; then
+  api POST /Library/Refresh >/dev/null
+  echo "    started (runs in the background; watch Dashboard -> Scheduled Tasks)"
+else
+  echo "    skipped (JELLYFIN_SCAN_ON_BOOTSTRAP=0)"
+fi
 
 echo "==> Setting base URL to ${JELLYFIN_BASE_URL}"
 NET=$(api GET /System/Configuration/network)
