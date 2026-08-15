@@ -14,6 +14,11 @@ Flat folder, one compose file per tier:
 
 Each stack has a matching `.env.example` (e.g. `core.env.example`) documenting required variables. Actual `.env` files are gitignored.
 
+Two scripts sit alongside the compose files:
+
+- **`up.sh`** — the entry point. Fresh-clone-to-running in one command; see "Running a stack" below.
+- **`jellyfin-bootstrap.sh`** — configures Jellyfin over its API (wizard, admin user, libraries, QSV, base URL). Called by `up.sh`, but standalone and idempotent, so it can be re-run on its own.
+
 Bring-up order: `core` first (creates routing/dashboard), then any consumer stack, in any order.
 
 ## Host environment facts
@@ -37,7 +42,18 @@ Bring-up order: `core` first (creates routing/dashboard), then any consumer stac
 
 ## Running a stack
 
-Compose does not read `<tier>.env` automatically — it must be passed explicitly, every time:
+From a fresh clone, `./up.sh` does everything:
+
+```
+git clone <repo> && cd nas-stack
+sudo ./up.sh              # --dry-run to see the plan first
+```
+
+It checks prerequisites, creates `<tier>.env` from each `.example` (never overwriting an existing one), creates host directories and chowns them to `PUID:PGID`, installs Homepage's `docker.yaml`, brings up core then jellyfin, runs `jellyfin-bootstrap.sh`, and restarts Jellyfin to activate the base URL. Idempotent — re-running reconciles rather than recreating. Flags: `--dry-run`, `--no-bootstrap`, and `core` / `jellyfin` to scope to one stack.
+
+**Run it as root** (or a user that can `chown` into `/volume2/docker`) — ownership is skipped with a notice otherwise, and Jellyfin then fails to write `/config`. The one interactive prompt is the Jellyfin admin password when `JELLYFIN_ADMIN_PASSWORD` is unset; it's written back to `jellyfin.env` with `chmod 600`. Warnings (missing media dirs, missing `/dev/dri/renderD128`, a `RENDER_GID` that doesn't match the host's render group) are non-fatal by design so a partial setup still comes up.
+
+Underneath it's plain compose — Compose does not read `<tier>.env` automatically, so it must be passed explicitly every time:
 
 ```
 docker compose --env-file core.env -f docker-compose.core.yml up -d   # creates nas-net
@@ -71,12 +87,21 @@ docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 - Hardware transcoding: Intel iGPU passthrough via `/dev/dri/renderD128` + `group_add: [\"${RENDER_GID}\"]`. `RENDER_GID` is host-specific — found via `getent group render | cut -d: -f3` over SSH (confirmed `105` on this NAS). `user: \"${PUID}:${PGID}\"` matches the rest of the stack. Before first `up`, confirm the device node exists: `ls -l /dev/dri` should show `renderD128`.
 - Storage split: `/config` and `/cache` on `/volume2/docker/jellyfin/...` (SSD); `/media/{movies,series,music}` mounted `:ro` from `/volume1/Media/...` (HDD) — Jellyfin never writes to media, all metadata/subtitle writes land in `/config`. Transcode temp files default to `/cache/transcodes` inside the container (no separate mount needed) — already on the SSD via the `/cache` mount, satisfying the "don't spin up the HDD" goal without extra config.
 - **Prerequisite**: bind-mount source directories are NOT auto-created with correct ownership. Before first `up`, on the NAS: `mkdir -p /volume2/docker/jellyfin/{config,cache}` then `chown -R 1000:10` those paths — otherwise the container (running as `1000:10` via `user:`) can't write `/config` and fails.
-- **Required manual post-first-boot steps** (in order):
-  1. First bring-up must be reached via the **direct port**, `apollo.local:8096` — the path route `apollo.local/jellyfin` does not work yet at this point.
-  2. Complete the Jellyfin setup wizard at `apollo.local:8096`.
-  3. Dashboard → Advanced → Networking → Base URL → set to `/jellyfin`, then restart the container. Base URL is not an env var or compose setting — Traefik's `PathPrefix(\`/jellyfin\`)` label only works once Jellyfin itself is told to expect that prefix (no `stripprefix` middleware is used; the path is passed through unchanged). After this, `apollo.local/jellyfin` works.
-  4. To use Jellyfin as the LAN's DLNA server (in place of UGOS's, which was disabled for this): Dashboard → Plugins → Catalog → install the DLNA plugin (built into core before v10.10, a separate plugin since). Plugins install through this same UI — nothing to pre-bake into the compose file.
-- Exposed both ways per your choice: through Traefik (`apollo.local/jellyfin`, path-based, after Base URL is set) and directly (`apollo.local:8096`) — the direct port matters for native/TV client auto-discovery (UDP broadcast to Jellyfin's own port, not the reverse proxy) and is required for the initial setup wizard.
+- **Unattended setup — `jellyfin-bootstrap.sh`.** Everything except the DLNA plugin is configured over the API, so first boot needs no dashboard clicking:
+
+  ```
+  docker compose --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
+  ./jellyfin-bootstrap.sh --dry-run   # prints every request without sending it
+  ./jellyfin-bootstrap.sh
+  docker restart jellyfin             # activates the base URL
+  ```
+
+  It runs the startup wizard (server name, admin user, metadata locale), creates the three libraries, enables Intel QSV, and sets the base URL. Idempotent — re-running skips the wizard if complete, skips libraries that already exist, and skips the base URL if already set. Config lives in `jellyfin.env` (`JELLYFIN_ADMIN_PASSWORD` has no default, so a missing value fails loudly rather than setting a bogus one).
+- **Why API and not pre-seeded XML.** `system.xml` / `network.xml` / `encoding.xml` *can* be written directly, and the API endpoints (`POST /System/Configuration{,/network,/encoding}`) just serialize the same objects to those same files — so nothing in them is API-blocked. But the admin user and libraries cannot be seeded as files at all: users are rows in an EF Core database (`/config/data/jellyfin.db`) with salted password hashes, and libraries are database rows *plus* a `.mblink` shortcut tree under `/config/root/default/`. Since the script is needed for those regardless, doing everything through it keeps one mechanism instead of two. `IsStartupWizardCompleted` is the one field with no API setter — `POST /Startup/Complete` flips it, which is the correct way to end the wizard anyway. Never write it as `true` onto an instance with no user: that yields a login screen with no account and no route back into the wizard.
+- **Ordering constraint — base URL goes last.** Once `BaseUrl` takes effect the entire API moves under `${JELLYFIN_BASE_URL}` (`:8096/jellyfin/...`), so the script sets it as its final call and every earlier call targets the bare root. It needs a container restart to activate. If you ever re-run the script against an instance that *already* has the base URL set, point `JELLYFIN_URL` at the prefixed root (`http://apollo.local:8096/jellyfin`).
+- **Library `collectionType` values are lowercase enum names** — `movies`, `tvshows`, `music`. Note `tvshows`, not `series`, despite the directory being `/volume1/Media/Series`. Paths sent to the API are **container** paths (`/media/series`), never host paths. Libraries are created with `EnableRealtimeMonitor: false` so inotify watching the media HDD can't defeat the no-idle-spin-up goal.
+- **Still manual after bootstrap**: to use Jellyfin as the LAN's DLNA server (in place of UGOS's, which was disabled for this), Dashboard → Plugins → Catalog → install the DLNA plugin (built into core before v10.10, a separate plugin since). Nothing to pre-bake into the compose file.
+- Exposed both ways per your choice: through Traefik (`apollo.local/jellyfin`, path-based) and directly (`apollo.local:8096/jellyfin` — prefixed, once the base URL is set) — the direct port matters for native/TV client auto-discovery (UDP broadcast to Jellyfin's own port, not the reverse proxy). `jellyfin-bootstrap.sh` runs against the *unprefixed* `apollo.local:8096` since it configures the server before the base URL exists.
 
 ## Open / future items
 
