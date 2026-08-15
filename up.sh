@@ -268,6 +268,12 @@ if want jellyfin; then
     if [ "$DRY_RUN" -eq 1 ]; then
       # shellcheck disable=SC2086
       ./jellyfin-bootstrap.sh --dry-run $BOOTSTRAP_ARGS 2>&1 | sed 's/^/    /' || true
+      if [ "${JELLYFIN_SCAN_ON_BOOTSTRAP:-1}" = "1" ]; then
+        say "Triggering library scan (after any restart)"
+        # shellcheck disable=SC2086
+        ./jellyfin-bootstrap.sh --scan-only --dry-run $BOOTSTRAP_ARGS 2>&1 \
+          | sed 's/^/    /' || true
+      fi
     else
       # Not piped: keeps stdout/stderr separate and unbuffered, so a failure's
       # diagnostics arrive in the right order for debugging.
@@ -284,6 +290,22 @@ if want jellyfin; then
         *)  echo "ERROR: jellyfin-bootstrap.sh failed (exit ${BOOTSTRAP_RC})." >&2
             exit "$BOOTSTRAP_RC" ;;
       esac
+
+      # Scan last, after any restart: it walks the whole media HDD, and a
+      # restart moments in would cut it short. --scan-only re-probes for the
+      # API root, so it finds the server wherever the base URL left it.
+      if [ "${JELLYFIN_SCAN_ON_BOOTSTRAP:-1}" = "1" ]; then
+        SCAN_RC=0
+        # shellcheck disable=SC2086
+        ./jellyfin-bootstrap.sh --scan-only $BOOTSTRAP_ARGS || SCAN_RC=$?
+        # A failed scan is not worth failing the whole bring-up over — the
+        # stack is running and the scan is re-triggerable from the dashboard.
+        if [ "$SCAN_RC" -ne 0 ]; then
+          warn "library scan could not be started (exit ${SCAN_RC})"
+        fi
+      else
+        info "library scan skipped (JELLYFIN_SCAN_ON_BOOTSTRAP=0)"
+      fi
     fi
   fi
 fi

@@ -21,12 +21,16 @@ set -euo pipefail
 
 DRY_RUN=0
 VERBOSE=0
+SCAN_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run)      DRY_RUN=1 ;;
     -v|--verbose)   VERBOSE=1 ;;
+    # Authenticate and trigger a library scan, nothing else. Used by up.sh
+    # after the post-BaseUrl restart, when the API has moved under the prefix.
+    --scan-only)    SCAN_ONLY=1 ;;
     *) echo "Unknown argument: ${arg}" >&2
-       echo "Usage: ./jellyfin-bootstrap.sh [--dry-run] [--verbose]" >&2
+       echo "Usage: ./jellyfin-bootstrap.sh [--dry-run] [--verbose] [--scan-only]" >&2
        exit 1 ;;
   esac
 done
@@ -49,9 +53,6 @@ JELLYFIN_METADATA_LANGUAGE="${JELLYFIN_METADATA_LANGUAGE:-en}"
 # when a title has no data for this one. Overridable per-library in the UI.
 JELLYFIN_METADATA_COUNTRY="${JELLYFIN_METADATA_COUNTRY:-US}"
 JELLYFIN_UI_CULTURE="${JELLYFIN_UI_CULTURE:-en-US}"
-# Set to 0 to skip the initial scan — it walks the whole media HDD, so on a
-# large library it is long and disk-heavy. Re-runs re-trigger it.
-JELLYFIN_SCAN_ON_BOOTSTRAP="${JELLYFIN_SCAN_ON_BOOTSTRAP:-1}"
 
 for cmd in curl jq; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd is required." >&2; exit 1; }
@@ -166,7 +167,15 @@ else
   WIZARD_DONE=false
 fi
 
-if [ "$WIZARD_DONE" = "false" ]; then
+# Only meaningful when we actually probed — in a dry run WIZARD_DONE is a
+# placeholder, not an observation.
+if [ "$SCAN_ONLY" -eq 1 ] && [ "$DRY_RUN" -eq 0 ] && [ "$WIZARD_DONE" = "false" ]; then
+  echo "ERROR: --scan-only needs a configured server, but the startup wizard is" >&2
+  echo "       still open. Run the full bootstrap first." >&2
+  exit 1
+fi
+
+if [ "$SCAN_ONLY" -eq 0 ] && [ "$WIZARD_DONE" = "false" ]; then
   echo "==> Running startup wizard"
 
   api POST /Startup/Configuration "$(jq -n \
@@ -240,6 +249,14 @@ else
   TOKEN="dry-run-token"
 fi
 
+if [ "$SCAN_ONLY" -eq 1 ]; then
+  echo "==> Triggering library scan"
+  # 204 comes back immediately; the scan itself runs in the background.
+  api POST /Library/Refresh >/dev/null
+  echo "    started (runs in the background; watch Dashboard -> Scheduled Tasks)"
+  exit 0
+fi
+
 echo "==> Creating libraries"
 if [ "$DRY_RUN" -eq 0 ]; then
   EXISTING=$(api GET /Library/VirtualFolders | jq -r '.[].Name')
@@ -299,18 +316,6 @@ api POST /System/Configuration/encoding "$(printf '%s' "$ENC" | jq \
    | .EnableIntelLowPowerHevcHwEncoder = true
    | .HardwareDecodingCodecs = ["h264","vc1","vp8","hevc","mpeg2video","vp9"]')" >/dev/null
 echo "    QSV on /dev/dri/renderD128"
-
-echo "==> Triggering library scan"
-# Libraries are created with refreshLibrary=false, so this is the first scan.
-# Must come BEFORE the base URL change — that is the last call against the bare
-# root. Returns 204 immediately; the scan itself runs in the background, so this
-# kicks it off rather than waiting for it.
-if [ "$JELLYFIN_SCAN_ON_BOOTSTRAP" = "1" ]; then
-  api POST /Library/Refresh >/dev/null
-  echo "    started (runs in the background; watch Dashboard -> Scheduled Tasks)"
-else
-  echo "    skipped (JELLYFIN_SCAN_ON_BOOTSTRAP=0)"
-fi
 
 echo "==> Setting base URL to ${JELLYFIN_BASE_URL}"
 NET=$(api GET /System/Configuration/network)
