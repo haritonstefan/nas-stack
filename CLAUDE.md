@@ -97,6 +97,12 @@ Everything Jellyfin knows — users, libraries, watch state, downloaded metadata
 - Homepage config dir (`${HOMEPAGE_CONFIG_DIR}`) needs the `docker.yaml` above; Homepage generates the rest of its skeleton config (`settings.yaml`/`services.yaml`/etc.) on first boot if absent.
 - Migration path to subdomains later: point specific devices' DNS at PiHole manually (router-wide DNS override isn't available in this environment), then switch each service's Traefik rule from `PathPrefix` to `Host`.
 
+## Working against live services
+
+- **Never use write requests to discover an API on a running instance.** Fetch the spec and read it offline first; probe with reads (`GET`, `/System/Info/Public`) only. Learning the Jellyfin API by POSTing to `/Startup/*` closed the setup wizard and reset the server name on a live server — and the `405` vs `404` signal it produced was misleading anyway (`/Startup/FirstUser` is GET-only, a dead end). The spec answered in one `jq` query what the probing got wrong.
+- Prefer the service's own logs and the published spec over inference from status codes. A status code tells you *that* something failed, rarely *why*.
+- Before any destructive recovery step (config wipe, `down.sh`, `rm -rf`), collect the evidence that step destroys — logs especially.
+
 ## Conventions for compose files
 
 - Minimal comments. Be verbose at the configuration level instead (explicit env vars, explicit port mappings, explicit volume paths, restart policies, healthchecks where sensible) rather than relying on image defaults.
@@ -122,12 +128,34 @@ Everything Jellyfin knows — users, libraries, watch state, downloaded metadata
 
   It runs the startup wizard (server name, admin user, metadata locale), creates the three libraries, enables Intel QSV, and sets the base URL. Idempotent — re-running skips the wizard if complete, skips libraries that already exist, and skips the base URL if already set. Config lives in `jellyfin.env` (`JELLYFIN_ADMIN_PASSWORD` has no default, so a missing value fails loudly rather than setting a bogus one).
 - **Why API and not pre-seeded XML.** `system.xml` / `network.xml` / `encoding.xml` *can* be written directly, and the API endpoints (`POST /System/Configuration{,/network,/encoding}`) just serialize the same objects to those same files — so nothing in them is API-blocked. But the admin user and libraries cannot be seeded as files at all: users are rows in an EF Core database (`/config/data/jellyfin.db`) with salted password hashes, and libraries are database rows *plus* a `.mblink` shortcut tree under `/config/root/default/`. Since the script is needed for those regardless, doing everything through it keeps one mechanism instead of two. `IsStartupWizardCompleted` is the one field with no API setter — `POST /Startup/Complete` flips it, which is the correct way to end the wizard anyway. Never write it as `true` onto an instance with no user: that yields a login screen with no account and no route back into the wizard.
+- **The API spec is vendored at `reference/jellyfin-openapi.json` — read it, don't probe for it.** See `reference/README.md` for query recipes. **Don't open it with WebFetch or `Read`**: it's ~1.9MB on one line and truncates alphabetically, before `/Startup` ever appears. Use `jq`:
+  ```
+  jq -r '.paths | to_entries[] | select(.key|test("^/Startup")) | "\(.key) [\(.value|keys|join(","))]"' reference/jellyfin-openapi.json
+  jq '.components.schemas.StartupUserDto' reference/jellyfin-openapi.json
+  ```
+- **The OpenAPI document versions independently of the server.** That file reports `info.version: 12.0.0` while describing a 10.11.x server — **there is no Jellyfin 12**. The release line is 10.x; newest published image is `10.11.11` (confirm against Docker Hub tags, not a version string found inside a spec). Because "stable" runs ahead of the pinned image, treat what it says as a strong hint, not proof, for this server.
+- **Config POSTs take the whole object — `{}` is not a no-op.** `/System/Configuration/*` and `/Startup/Configuration` deserialize the posted body over the entire config object, so an empty body *resets every field* (this is how `ServerName` got wiped back to the container ID). Always GET-modify-POST, as the script does for `encoding` and `network`.
+- **The wizard is one-shot.** `POST /Startup/Complete` closes `/Startup/*` permanently; doing that on an instance with no admin user yields a login screen with no account and no way back in. Each config wipe buys exactly one attempt — get the script right before spending it.
+- **`jellyfin-bootstrap.sh` fails safe, deliberately.** `curl -fsS` under `set -e` aborts on the first HTTP error, which is *before* `/Startup/Complete` — so a mid-wizard failure leaves the wizard open and the script re-runnable. Preserve that property when editing.
+- **Grab the logs before any reset.** Jellyfin writes to `/volume2/docker/jellyfin/config/log/jellyfin*.log` — inside the directory the reset wipes. Full reset:
+  ```
+  docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml down
+  rm -rf /volume2/docker/jellyfin/config/*
+  sudo ./up.sh jellyfin
+  ```
 - **Ordering constraint — base URL goes last.** Once `BaseUrl` takes effect the entire API moves under `${JELLYFIN_BASE_URL}` (`:8096/jellyfin/...`), so the script sets it as its final call and every earlier call targets the bare root. It needs a container restart to activate. If you ever re-run the script against an instance that *already* has the base URL set, point `JELLYFIN_URL` at the prefixed root (`http://apollo.local:8096/jellyfin`).
 - **Library `collectionType` values are lowercase enum names** — `movies`, `tvshows`, `music`. Note `tvshows`, not `series`, despite the directory being `/volume1/Media/Series`. Paths sent to the API are **container** paths (`/media/series`), never host paths. Libraries are created with `EnableRealtimeMonitor: false` so inotify watching the media HDD can't defeat the no-idle-spin-up goal.
 - **Still manual after bootstrap**: to use Jellyfin as the LAN's DLNA server (in place of UGOS's, which was disabled for this), Dashboard → Plugins → Catalog → install the DLNA plugin (built into core before v10.10, a separate plugin since). Nothing to pre-bake into the compose file.
 - Exposed both ways per your choice: through Traefik (`apollo.local/jellyfin`, path-based) and directly (`apollo.local:8096/jellyfin` — prefixed, once the base URL is set) — the direct port matters for native/TV client auto-discovery (UDP broadcast to Jellyfin's own port, not the reverse proxy). `jellyfin-bootstrap.sh` runs against the *unprefixed* `apollo.local:8096` since it configures the server before the base URL exists.
 
 ## Open / future items
+
+- **UNRESOLVED: `POST /Startup/User` returns 404 on 10.11.11.** The endpoint is correct and documented (`{Name, Password}`, spec lists responses 204/401/403/503 — no 404), so this is *not* a renamed endpoint, and `/Startup/FirstUser` is GET-only so it's not the replacement. Every `/Startup/*` route shares one policy (`FirstTimeSetupOrElevated`), yet `/Startup/Configuration` returned 204 while `/Startup/User` returned 404 on the same server seconds apart — so the 404 originates inside the handler, not in routing or auth. Cause still unverified; server logs unread. **Discriminating test**, read-only, on a fresh instance with the wizard still open (`FirstTimeSetupOrElevated` passes unauthenticated there):
+  ```
+  curl -sS -w '\n%{http_code}\n' http://apollo.local:8096/Startup/User \
+    -H 'Authorization: MediaBrowser Client="probe", Device="probe", DeviceId="p1", Version="1.0.0"'
+  ```
+  A user object → the row exists and the 404 is elsewhere in the handler. Empty or 404 → no first user is auto-created on this version, which makes the "updates the auto-created first user" assumption in `jellyfin-bootstrap.sh` the actual bug, and the fix a different creation path.
 
 - More \*arr services (e.g. bazarr, lidarr) may be added to the arr stack — keep that compose file structured so adding a service is a simple copy-paste block.
 - HTTPS/TLS on Traefik: not yet configured, add later.

@@ -176,10 +176,9 @@ ERROR: could not authenticate as "${JELLYFIN_ADMIN_USER}".
      Check JELLYFIN_ADMIN_USER / JELLYFIN_ADMIN_PASSWORD in ${ENV_FILE}.
   2. POST /Startup/User did not set the credentials as expected on this
      Jellyfin version. Reset and retry:
-       docker compose -f docker-compose.jellyfin.yml down
+       docker compose -p nas-jellyfin --env-file ${ENV_FILE} -f docker-compose.jellyfin.yml down
        rm -rf ${JELLYFIN_CONFIG_DIR:-/volume2/docker/jellyfin/config}/*
-       docker compose --env-file ${ENV_FILE} -f docker-compose.jellyfin.yml up -d
-       ./jellyfin-bootstrap.sh
+       sudo ./up.sh jellyfin
 
   Server said: $(printf '%s' "$AUTH_JSON" | head -c 200)
 EOF
