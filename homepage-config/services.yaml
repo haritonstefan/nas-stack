@@ -1,0 +1,13 @@
+# Services Homepage cannot auto-discover from Docker labels — anything that is
+# not a container on this host. Containers should NOT be listed here; give them
+# `homepage.*` labels in their own compose file instead, so the tile lives with
+# the service definition.
+#
+# Copied to the Homepage config dir by up.sh only if not already present, so
+# local edits survive. Edit it there, not here, once running.
+
+- NAS:
+    - UGOS:
+        icon: ugreen.png
+        href: http://apollo.local:9999
+        description: NAS administration

@@ -6,11 +6,23 @@ Self-hosted service stacks for a UGreen NAS (UGOS, `apollo.local`), as Docker Co
 
 One standalone `docker-compose.<tier>.yml` per tier, no shared compose file, no runtime coupling between stacks beyond the `nas-net` network:
 
-- **`core`** — `nas-net`, Traefik (routing), Homepage (dashboard). Everything else depends on it; it depends on nothing.
+- **`core`** — `nas-net` and Homepage (dashboard on `:80`, the entrypoint to everything). Everything else depends on it; it depends on nothing.
 - **`jellyfin`** — built.
 - **`arr`** (sonarr/radarr/prowlarr/torrent), **`pihole`** — not yet built.
 
 Bring-up order: `core` first, then consumer stacks in any order.
+
+### Files
+
+- `docker-compose.<tier>.yml` + `<tier>.env.example` — one self-contained pair per tier.
+- `up.sh` / `down.sh` / `jellyfin-bootstrap.sh` — the automation. All have `--help`.
+- `apollo-nas-stack-spec.md` — target state and the **reasoning** behind each constraint.
+  Read it before proposing an architectural change.
+- `homepage-config/` — templates (`docker.yaml`, `services.yaml`) that `up.sh` installs
+  into the Homepage config dir only when absent, so on-NAS edits survive.
+- `reference/` — the vendored Jellyfin OpenAPI spec (query it with `jq`, never `Read` it)
+  plus recipes in `reference/README.md`.
+- `TODO-healthchecks.md` — the one open work item.
 
 ## Your role
 
@@ -47,9 +59,10 @@ Run this on the NAS and paste the output:
 - `/volume1/Media/{Movies,Series,Music}` — HDD, media only. Mounted `:ro` where a service only reads.
 - `/volume2/docker` — SSD, all container config/logs + this repo. Nothing that spins up the HDD at idle lives here.
 - PUID/PGID `1000:10`. `RENDER_GID=105` (Intel iGPU, `/dev/dri/renderD128`). `TZ=Europe/Bucharest`.
+- LAN IP `192.168.0.231` (DHCP reservation), `apollo.local` via mDNS.
 - Bind-mount sources are **not** auto-created with correct ownership — `up.sh` mkdir+chowns them, so run it as root.
-- Ports: 80/443 free → Traefik (443/TLS not configured yet). `0.0.0.0:53` free → PiHole. Traefik dashboard on 8082.
-- Docker daemon API `1.54`; Traefik pinned `v3.7.10` (older Traefik fails against this daemon).
+- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `0.0.0.0:53` free → PiHole. UGOS on 9999.
+- Docker daemon API `1.54` — pin images to exact patch versions and check compatibility against this.
 - Compose files must not hardcode host paths — all via `.env` (gitignored; `<tier>.env.example` is the template).
 
 ## Running
@@ -63,35 +76,40 @@ docker compose -p nas-core --env-file core.env -f docker-compose.core.yml up -d 
 docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
 ```
 
-`down.sh` invariant to preserve: **nothing outside `/volume2/docker` can be deleted** — delete targets come from a sourced `.env`, so every path is validated against that root and rejected if it escapes, contains `..`, or is the root itself. `.env` files survive teardown (so no re-prompt for the Jellyfin password). Stacks come down jellyfin-first, core-last, since core owns `nas-net`.
+`down.sh` invariant to preserve: **nothing outside `/volume2/docker` can be deleted** — delete targets come from a sourced `.env`, so every path is validated against that root and rejected if it escapes, contains `..`, or is the root itself. `.env` files survive teardown (so no re-prompt for the Jellyfin password). Stacks come down jellyfin-first, core-last, since core owns `nas-net` and later bridged tiers will hold references to it.
 
 ## Networking & routing
 
-- `nas-net` is defined by `core` (not `external:` there); every consumer stack joins it as `external: true`. Bridge, never `network_mode: host` — container-name resolution must keep working.
-- mDNS resolves single names only, so **routing is path-based, not subdomain-based**: `apollo.local/jellyfin`, `apollo.local/pihole`. Subdomains become possible once PiHole is the resolver on specific devices; then swap `PathPrefix` → `Host`.
-- Traefik: Docker provider, `exposedbydefault=false` — a service opts in with `traefik.enable=true` in its own compose file.
-- Homepage is the catch-all at `/` (`PathPrefix(/)`, `priority=1`). Any explicit priority elsewhere must be > 1. Homepage's Docker integration needs both the socket mount *and* `docker.yaml` in its config dir (template: `homepage-config/docker.yaml`).
-- Path-based routing needs a `stripprefix` middleware **and** a matching "base URL" setting in the app itself if it emits absolute links. Verify assets (JS/CSS/API) load — not just that the landing HTML returns 200.
+Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other service is reached on its own port via a dashboard tile. Plain HTTP.
+
+- Adding a service: publish its port, give it `homepage.*` labels, done.
+- `nas-net` is defined by `core` (not `external:` there); consumer stacks join it as `external: true`. Bridge by default — `network_mode: host` only for a service that strictly needs broadcast/multicast on the LAN (Jellyfin is the one exception).
+- **`nas-net` carries no traffic today** — Homepage is its only member and Jellyfin is host-networked, so nothing resolves anything by container name yet. It exists for the `arr` stack, whose services talk to each other by name. Don't assume Homepage and Jellyfin share a network when debugging.
+- Homepage's Docker integration needs both the socket mount *and* `docker.yaml` in its config dir (template: `homepage-config/docker.yaml`). Labels are read over the **Docker socket API, not the network**, so host-networked and off-`nas-net` containers still auto-discover.
+- `homepage.href` values are real addresses (`http://apollo.local:8096`), and tiles are the only way in — a wrong href is a user-visible dead end.
+- `HOMEPAGE_ALLOWED_HOSTS` must list **every** name/address Homepage is reached *at* — the NAS's own name and IP, not the clients'. An unlisted Host header gets a 400. **No wildcard or CIDR support**: `192.168.0.*` is matched literally and rejects everything, so each address is listed in full (`*` alone disables the check entirely).
+- Anything not a container (UGOS on 9999) can't be auto-discovered — hand-add it in `services.yaml`.
+- After any change, verify assets (JS/CSS/API) load — not just that the landing HTML returns 200.
 
 ## Compose conventions
 
 - Minimal comments; be explicit at the configuration level instead.
-- Every service: exact image tag, `container_name`, `restart`, explicit `networks: [nas-net]`, explicit volumes (config vs media separated), `logging:` capped (`json-file`, `max-size: 10m`, `max-file: 5`).
+- Every service: exact image tag, `container_name`, `restart`, explicit `networks: [nas-net]` (unless it uses `network_mode: host`, which is exclusive of both `networks:` and `ports:`), explicit volumes (config vs media separated), `logging:` capped (`json-file`, `max-size: 10m`, `max-file: 5`).
 - Every `${VAR}` gets a `:-default` matching the `.env.example` — **except** secrets, which must fail loudly when unset.
 
 ## Jellyfin
 
-- Bridge network + explicit ports: `8096` (web), `7359/udp` (discovery), `1900/udp` (DLNA — UGOS's own responder was disabled for this). Direct port access matters for TV client auto-discovery.
+- **`network_mode: host`** — the one exception to the bridge rule. Client auto-discovery (`7359/udp`) and SSDP/DLNA (`1900/udp`) are broadcast/multicast, which Docker bridge port publishing does not forward, so discovery cannot work behind a bridge. Jellyfin binds `8096`, `7359` and `1900` on the host directly, so `ports:` does not apply and must never be added. UGOS's own DLNA responder is disabled to free `1900`.
 - `/config` + `/cache` on SSD; `/media/*` `:ro` from the HDD. Transcodes default to `/cache/transcodes`, already on SSD.
-- `jellyfin-bootstrap.sh` does the whole first-boot setup over the API (wizard, admin user, libraries, QSV, base URL) and is idempotent. It fails safe by design: `curl -fsS` under `set -e` aborts *before* `/Startup/Complete`, leaving the wizard open and the script re-runnable. **Preserve that.**
+- `jellyfin-bootstrap.sh` does the whole first-boot setup over the API (wizard, admin user, libraries, QSV, and asserts an empty base URL) and is idempotent. It fails safe by design: `api()` returns 22 on any non-2xx, and under `set -e` that aborts *before* `/Startup/Complete`, leaving the wizard open and the script re-runnable. **Preserve that.**
 - **The wizard is one-shot.** `POST /Startup/Complete` closes `/Startup/*` forever; doing it with no admin user leaves a login screen with no account. Each config wipe buys exactly one attempt.
 - **`{}` is not a no-op.** `/System/Configuration/*` and `/Startup/Configuration` deserialize over the entire config object — an empty body resets every field.
-- **Base URL goes last.** Once set, the whole API moves under `/jellyfin` and needs a container restart. Re-running the script afterwards means pointing `JELLYFIN_URL` at the prefixed root.
+- **Base URL must stay empty, and is asserted last.** Jellyfin serves from the root of `:8096`. Bootstrap clears `BaseUrl` if anything set it, and does so last because a non-empty value moves the whole API under that prefix — no call may follow it. Changing it needs a container restart.
 - Libraries: `collectionType` is a lowercase enum — `movies`, `tvshows` (not `series`), `music`. Paths are **container** paths (`/media/series`). Created with `EnableRealtimeMonitor: false` so inotify can't spin the HDD.
 - **`GET /Startup/User` before `POST /Startup/User`.** The GET is not a read — `GetFirstUser()` calls `_userManager.InitializeAsync()`, which lazily creates the default user. `UpdateStartupUser()` only *updates*, returning a bare `NotFound()` when `GetFirstUser()` is null. Skip the GET on a fresh `/config` and the POST 404s; the same script then "works" on any server where someone opened the wizard UI or ran the GET by hand. A 404 here means *no user yet*, not a bad route.
 - **An OpenAPI spec lists routes, not preconditions.** `POST /Startup/User` is declared with responses 204/401/403/503 — no 404 — yet returns 404 in exactly the case above. When a documented endpoint fails a way the spec says it can't, the spec is exhausted as evidence: read the controller source for the pinned tag (`raw.githubusercontent.com/jellyfin/jellyfin/v<version>/Jellyfin.Api/Controllers/<Name>Controller.cs`) instead of re-reading the spec.
 - **Never send `curl -f` at a diagnostic.** `-f` discards the response body on HTTP errors, which is where Jellyfin puts its ASP.NET `ProblemDetails`. Capture status and body separately (`-w '\n%{http_code}'`). `jellyfin-bootstrap.sh --verbose` logs every request, status, and response body, with `Password` masked.
-- **Tell Jellyfin's 404 from a proxy's.** Jellyfin answers with JSON `ProblemDetails` (`type`/`title`/`status`/`traceId`) and `Server: Kestrel`; Traefik answers with a bare `404 page not found`. Check `curl -i` headers before blaming routing.
+- **Know Jellyfin's own 404.** It answers with JSON `ProblemDetails` (`type`/`title`/`status`/`traceId`) and `Server: Kestrel` — that shape means the request reached Jellyfin and the route is wrong, not the network. Check `curl -i` headers before guessing.
 - **Spec is vendored at `reference/jellyfin-openapi.json`** (recipes in `reference/README.md`). Query it with `jq` — **never `Read` or WebFetch it**: 1.9MB on one line, truncates alphabetically before `/Startup`. Refresh it from the running server, which is the only copy guaranteed to match the binary: `curl -sS http://<host>:8096/api-docs/openapi.json -o reference/jellyfin-openapi.json`, then confirm `jq -r '.info.version'` reports the running version — a vendored copy reading `12.0.0` is from another branch and may not describe your server.
 
   ```

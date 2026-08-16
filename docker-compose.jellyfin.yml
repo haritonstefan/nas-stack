@@ -3,6 +3,11 @@ services:
     image: jellyfin/jellyfin:10.11.11
     container_name: jellyfin
     restart: unless-stopped
+    # Host networking: SSDP (1900/udp) and client auto-discovery (7359/udp) are
+    # multicast/broadcast, which Docker bridge port publishing does not forward —
+    # confirmed empirically. Jellyfin binds 8096, 7359 and 1900 on the host
+    # directly, so `ports:` does not apply here.
+    network_mode: host
     user: "${PUID:-1000}:${PGID:-10}"
     group_add:
       - "${RENDER_GID:-105}"
@@ -16,28 +21,14 @@ services:
       - ${MEDIA_MUSIC_DIR:-/volume1/Media/Music}:/media/music:ro
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
-    ports:
-      - "${JELLYFIN_HTTP_PORT:-8096}:8096"
-      - "${JELLYFIN_DISCOVERY_PORT:-7359}:7359/udp"
-      - "${JELLYFIN_DLNA_PORT:-1900}:1900/udp"
-    networks:
-      - nas-net
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.jellyfin.rule=PathPrefix(`/jellyfin`)
-      - traefik.http.routers.jellyfin.entrypoints=web
-      - traefik.http.services.jellyfin.loadbalancer.server.port=8096
       - homepage.group=Media
       - homepage.name=Jellyfin
       - homepage.icon=jellyfin.png
-      - homepage.href=http://apollo.local/jellyfin
+      - homepage.href=http://apollo.local:8096
       - homepage.description=Media server
-
-networks:
-  nas-net:
-    external: true

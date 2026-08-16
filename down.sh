@@ -4,7 +4,8 @@
 #
 # DESTRUCTIVE. Everything Jellyfin knows — users, libraries, watch state,
 # metadata — lives in /volume2/docker/jellyfin and does not survive this.
-# Nothing outside /volume2/docker is ever deleted.
+# Homepage's config goes too, including any tile edits made on the NAS.
+# Media under /volume1 is never touched; nothing outside /volume2/docker is.
 #
 #   ./down.sh                 # dry run: shows exactly what would be removed
 #   ./down.sh --yes           # actually do it (prompts once for confirmation)
@@ -30,7 +31,10 @@ for arg in "$@"; do
     --containers)   CONTAINERS_ONLY=1 ;;
     core|jellyfin)  STACKS="${STACKS} ${arg}" ;;
     -h|--help)
-      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+      # Print the header block: every comment line after the shebang, stopping
+      # at the first non-comment. Self-adjusting, so editing the header above
+      # cannot silently truncate --help.
+      sed -n '2,${/^#/!q; s/^# \{0,1\}//p;}' "$0"
       exit 0 ;;
     *)
       echo "Unknown argument: ${arg}" >&2
@@ -70,9 +74,6 @@ SAFE_ROOT="/volume2/docker"
 DELETE_PATHS=""
 case " $STACKS " in
   *" core "*)
-    # Traefik keeps no host config (docker.sock only), but a logs/acme dir may
-    # exist from earlier iterations — remove it if so.
-    DELETE_PATHS="${DELETE_PATHS} ${SAFE_ROOT}/traefik"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${HOMEPAGE_CONFIG_DIR:-${SAFE_ROOT}/homepage/config}")"
     ;;
 esac
@@ -159,8 +160,9 @@ fi
 
 # --- tear down ---------------------------------------------------------------
 
-# Jellyfin first: it joins nas-net as an external network, and core owns that
-# network, so removing core last avoids "network in use" errors.
+# Jellyfin first, core last: core owns nas-net, and any bridged consumer stack
+# added later holds a reference to it. Jellyfin itself is host-networked and on
+# no Docker network, so it is order-independent today.
 for tier in jellyfin core; do
   case " $STACKS " in *" $tier "*) ;; *) continue ;; esac
   say "Stopping ${tier} stack"
@@ -173,10 +175,10 @@ for tier in jellyfin core; do
   fi
 done
 
-# Containers predating the -p convention live under the directory-derived
-# project name and are missed by the calls above; clean them up by name.
+# A container started outside the -p convention lives under a different project
+# name and is missed by the calls above; clean up by name as a backstop.
 say "Removing any stray containers by name"
-for c in traefik homepage jellyfin; do
+for c in homepage jellyfin; do
   if docker ps -aq -f "name=^${c}$" | grep -q .; then
     run docker rm -f "$c" >/dev/null
     info "removed ${c}"

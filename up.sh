@@ -10,8 +10,9 @@ Brings the whole NAS stack up from a fresh clone:
   git clone ... && cd nas-stack && sudo ./up.sh
 
 Creates .env files from the examples, creates host directories with the right
-ownership, starts core (Traefik + Homepage, which creates nas-net), starts
-Jellyfin, then configures Jellyfin over its API via jellyfin-bootstrap.sh.
+ownership, starts core (Homepage on :80, which creates nas-net), starts
+Jellyfin (host networking), then configures it over its API via
+jellyfin-bootstrap.sh.
 
 Idempotent — existing .env files are never overwritten, already-running stacks
 are reconciled rather than recreated, and the bootstrap skips what is already
@@ -145,16 +146,21 @@ make_dir() {
 
 if want core; then
   make_dir "${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}"
-  # Homepage renders tiles from labels without this, but container stats and
-  # status only resolve once docker.yaml declares the socket.
-  HP_DOCKER="${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}/docker.yaml"
-  if [ -f "$HP_DOCKER" ]; then
-    info "docker.yaml exists, leaving untouched"
-  else
-    run cp homepage-config/docker.yaml "$HP_DOCKER"
-    [ "$IS_ROOT" -eq 1 ] && run chown "${PUID}:${PGID}" "$HP_DOCKER"
-    info "docker.yaml $([ "$DRY_RUN" -eq 1 ] && echo 'would be installed' || echo installed)"
-  fi
+  # docker.yaml: tiles render from labels without it, but container stats and
+  # status only resolve once it declares the socket.
+  # services.yaml: seeds tiles for things that are not containers here (UGOS)
+  # and so cannot be auto-discovered.
+  # Both are copied only when absent, so edits made on the NAS survive re-runs.
+  HP_CONFIG="${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}"
+  for hp_file in docker.yaml services.yaml; do
+    if [ -f "${HP_CONFIG}/${hp_file}" ]; then
+      info "${hp_file} exists, leaving untouched"
+    else
+      run cp "homepage-config/${hp_file}" "${HP_CONFIG}/${hp_file}"
+      [ "$IS_ROOT" -eq 1 ] && run chown "${PUID}:${PGID}" "${HP_CONFIG}/${hp_file}"
+      info "${hp_file} $([ "$DRY_RUN" -eq 1 ] && echo 'would be installed' || echo installed)"
+    fi
+  done
 fi
 
 if want jellyfin; then
@@ -251,7 +257,7 @@ compose_up() {
     -f "docker-compose.${tier}.yml" up -d
 }
 
-# core first: it defines nas-net, which every other stack joins as external.
+# core first: it defines nas-net, which later bridged tiers join as external.
 if want core;     then compose_up core;     fi
 if want jellyfin; then compose_up jellyfin; fi
 
@@ -277,14 +283,14 @@ if want jellyfin; then
     else
       # Not piped: keeps stdout/stderr separate and unbuffered, so a failure's
       # diagnostics arrive in the right order for debugging.
-      # Exit 10 means it changed BaseUrl and a restart is needed; 0 means
+      # Exit 10 means it cleared a BaseUrl and a restart is needed; 0 means
       # nothing to activate. Anything else is a real failure.
       BOOTSTRAP_RC=0
       # shellcheck disable=SC2086
       ./jellyfin-bootstrap.sh $BOOTSTRAP_ARGS || BOOTSTRAP_RC=$?
       case "$BOOTSTRAP_RC" in
         0)  info "no restart needed" ;;
-        10) say "Restarting Jellyfin to apply the base URL"
+        10) say "Restarting Jellyfin to apply the cleared base URL"
             docker restart jellyfin >/dev/null
             info "restarted" ;;
         *)  echo "ERROR: jellyfin-bootstrap.sh failed (exit ${BOOTSTRAP_RC})." >&2
@@ -292,8 +298,7 @@ if want jellyfin; then
       esac
 
       # Scan last, after any restart: it walks the whole media HDD, and a
-      # restart moments in would cut it short. --scan-only re-probes for the
-      # API root, so it finds the server wherever the base URL left it.
+      # restart moments in would cut it short.
       if [ "${JELLYFIN_SCAN_ON_BOOTSTRAP:-1}" = "1" ]; then
         SCAN_RC=0
         # shellcheck disable=SC2086
@@ -315,10 +320,9 @@ fi
 say "Done"
 if want core; then
   info "Homepage:          http://apollo.local/"
-  info "Traefik dashboard: http://apollo.local:${TRAEFIK_DASHBOARD_PORT:-8082}/dashboard/"
 fi
 if want jellyfin; then
-  info "Jellyfin:          http://apollo.local${JELLYFIN_BASE_URL:-/jellyfin}"
+  info "Jellyfin:          http://apollo.local:8096"
   printf '\n'
   info "Still manual: Jellyfin Dashboard -> Plugins -> Catalog -> DLNA, if you"
   info "want Jellyfin to serve DLNA in place of UGOS's disabled responder."

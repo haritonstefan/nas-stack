@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Configures a fresh Jellyfin instance over the API: server name, admin user,
-# libraries, Intel QSV hardware transcoding, and the /jellyfin base URL.
+# libraries, Intel QSV hardware transcoding, and asserts an empty base URL.
 # Idempotent — safe to re-run.
 #
 # Run AFTER `docker compose ... up -d` on a fresh (never-configured) Jellyfin.
@@ -11,9 +11,10 @@
 #   ./jellyfin-bootstrap.sh --dry-run
 #   JELLYFIN_URL=http://apollo.local:8096 ./jellyfin-bootstrap.sh
 #
-# BaseUrl is applied LAST, deliberately: once it takes effect the API moves to
-# ${JELLYFIN_URL}${JELLYFIN_BASE_URL}, so every call before it targets the bare
-# root and no call may follow it. A container restart activates it.
+# Jellyfin serves from the root of its own port, so BaseUrl must stay empty.
+# The script asserts that LAST: a non-empty value
+# would move the whole API under that prefix, so no call may follow it. Changing
+# it needs a container restart to take effect.
 #
 # Requires: curl, jq. Reads jellyfin.env if present (for JELLYFIN_ADMIN_*).
 
@@ -27,7 +28,7 @@ for arg in "$@"; do
     --dry-run)      DRY_RUN=1 ;;
     -v|--verbose)   VERBOSE=1 ;;
     # Authenticate and trigger a library scan, nothing else. Used by up.sh
-    # after the post-BaseUrl restart, when the API has moved under the prefix.
+    # after the restart, when a base URL had to be cleared.
     --scan-only)    SCAN_ONLY=1 ;;
     *) echo "Unknown argument: ${arg}" >&2
        echo "Usage: ./jellyfin-bootstrap.sh [--dry-run] [--verbose] [--scan-only]" >&2
@@ -46,7 +47,6 @@ fi
 JELLYFIN_URL="${JELLYFIN_URL:-http://apollo.local:8096}"
 JELLYFIN_SERVER_NAME="${JELLYFIN_SERVER_NAME:-Apollo}"
 JELLYFIN_ADMIN_USER="${JELLYFIN_ADMIN_USER:-admin}"
-JELLYFIN_BASE_URL="${JELLYFIN_BASE_URL:-/jellyfin}"
 JELLYFIN_METADATA_LANGUAGE="${JELLYFIN_METADATA_LANGUAGE:-en}"
 # Region for metadata providers: picks release dates and certification scheme
 # (US -> PG-13/R). Not a content filter — providers fall back to other regions
@@ -131,26 +131,18 @@ fi
 
 echo "==> Waiting for Jellyfin at ${JELLYFIN_URL}"
 if [ "$DRY_RUN" -eq 0 ]; then
-  # An instance that already has BaseUrl set serves its whole API under that
-  # prefix, so probe both roots and adopt whichever actually answers. Without
-  # this, a re-run against a configured server 503s on the first wizard call.
-  BASE_STRIPPED="${JELLYFIN_URL%/}"
-  BASE_STRIPPED="${BASE_STRIPPED%"${JELLYFIN_BASE_URL}"}"
+  JELLYFIN_URL="${JELLYFIN_URL%/}"
   PROBE_INFO=""
   for i in $(seq 1 90); do
-    for candidate in "$BASE_STRIPPED" "${BASE_STRIPPED}${JELLYFIN_BASE_URL}"; do
-      # /System/Info/Public is unauthenticated and only 200s once the server is
-      # genuinely serving requests — a plain TCP connect is not enough, since
-      # Jellyfin accepts connections well before it finishes starting.
-      if PROBE_INFO=$(curl -fsS --max-time 5 "${candidate}/System/Info/Public" 2>/dev/null) \
-         && printf '%s' "$PROBE_INFO" | jq -e '.Version' >/dev/null 2>&1; then
-        JELLYFIN_URL="$candidate"
-        break 2
-      fi
-    done
+    # /System/Info/Public is unauthenticated and only 200s once the server is
+    # genuinely serving requests — a plain TCP connect is not enough, since
+    # Jellyfin accepts connections well before it finishes starting.
+    if PROBE_INFO=$(curl -fsS --max-time 5 "${JELLYFIN_URL}/System/Info/Public" 2>/dev/null) \
+       && printf '%s' "$PROBE_INFO" | jq -e '.Version' >/dev/null 2>&1; then
+      break
+    fi
     if [ "$i" -eq 90 ]; then
-      echo "ERROR: Jellyfin did not answer at ${BASE_STRIPPED} or" >&2
-      echo "       ${BASE_STRIPPED}${JELLYFIN_BASE_URL} after 180s." >&2
+      echo "ERROR: Jellyfin did not answer at ${JELLYFIN_URL} after 180s." >&2
       echo "       Check: docker logs jellyfin" >&2
       exit 1
     fi
@@ -317,25 +309,19 @@ api POST /System/Configuration/encoding "$(printf '%s' "$ENC" | jq \
    | .HardwareDecodingCodecs = ["h264","vc1","vp8","hevc","mpeg2video","vp9"]')" >/dev/null
 echo "    QSV on /dev/dri/renderD128"
 
-echo "==> Setting base URL to ${JELLYFIN_BASE_URL}"
+echo "==> Ensuring base URL is empty (serving from root)"
 NET=$(api GET /System/Configuration/network)
 [ "$DRY_RUN" -eq 1 ] && NET='{}'
 CURRENT_BASE=$(printf '%s' "$NET" | jq -r '.BaseUrl // ""')
-if [ "$CURRENT_BASE" = "$JELLYFIN_BASE_URL" ]; then
-  echo "    already set, skipping"
+if [ -z "$CURRENT_BASE" ]; then
+  echo "    already empty, skipping"
   RESTART_NEEDED=0
 else
-  # LAST call against the bare root — the API moves under the prefix after this.
   api POST /System/Configuration/network "$(printf '%s' "$NET" \
-    | jq --arg b "$JELLYFIN_BASE_URL" '.BaseUrl = $b')" >/dev/null
-  echo "    set"
+    | jq '.BaseUrl = ""')" >/dev/null
+  echo "    cleared"
   RESTART_NEEDED=1
 fi
-
-# JELLYFIN_URL may already carry the prefix (detected above), so strip before
-# re-appending rather than doubling it up.
-DIRECT_URL="${JELLYFIN_URL%/}"
-DIRECT_URL="${DIRECT_URL%"${JELLYFIN_BASE_URL}"}${JELLYFIN_BASE_URL}"
 
 cat <<EOF
 
@@ -343,13 +329,13 @@ cat <<EOF
 EOF
 if [ "${RESTART_NEEDED}" -eq 1 ]; then
   cat <<EOF
-    Restart for the base URL to take effect:
+    Restart for the cleared base URL to take effect:
       docker restart jellyfin
 EOF
 fi
 cat <<EOF
-    Traefik: http://apollo.local${JELLYFIN_BASE_URL}
-    Direct:  ${DIRECT_URL}
+    Jellyfin: ${JELLYFIN_URL%/}
+      (also on the LAN as http://apollo.local:8096)
 
     Still manual: Dashboard -> Plugins -> Catalog -> DLNA (if you want Jellyfin
     to serve DLNA in place of UGOS's disabled responder).

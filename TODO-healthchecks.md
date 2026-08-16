@@ -1,51 +1,27 @@
-# Healthchecks
+# Healthchecks — open
 
-## The problem
+No service in either stack defines a `healthcheck:`. This is the only genuinely open item
+in the repo.
 
-`CLAUDE.md`'s own stated convention lists "healthchecks where sensible" as
-part of "Conventions for compose files" — but neither `docker-compose.core.yml`
-(Traefik, Homepage) nor `docker-compose.jellyfin.yml` (Jellyfin) has one.
+## Why bother
 
-Related: Homepage's `depends_on: [traefik]` in `docker-compose.core.yml`
-currently only controls **start order** (Compose default condition is
-`service_started`, i.e. "the container process started," not "the service is
-actually ready"). Since Traefik discovers routes dynamically at runtime via
-the Docker provider, this `depends_on` doesn't actually gate anything
-meaningful today — Homepage doesn't need Traefik to be ready to start, it
-just needs Traefik to eventually pick up its labels. Worth deciding whether
-to keep, remove, or upgrade it once healthchecks exist.
+- `docker ps` shows a container as `Up` even when the process inside is wedged — Homepage
+  stuck loading config, Jellyfin's web server hung. A healthcheck turns "the process
+  started" into "the service answers."
+- `restart: unless-stopped` does **not** restart a container that is running but
+  unresponsive. Only a failing healthcheck (plus something acting on it) catches that.
+- Homepage surfaces container status on the dashboard via its Docker socket integration,
+  so healthy/unhealthy would show up where you already look.
 
-## Why add healthchecks at all
+## Scope
 
-- `docker compose ps` / `docker ps` currently show every service as
-  `Up`/running even if the process inside is wedged (e.g. Homepage stuck
-  during config load, Jellyfin's web server hung). A healthcheck turns
-  "process is running" into "service is actually responding."
-- `restart: unless-stopped` alone doesn't restart a container that's running
-  but unresponsive — only a failed healthcheck (combined with something
-  acting on it) catches that class of failure.
-- If `depends_on` conditions are upgraded to `service_healthy` later (see
-  below), start-order actually becomes meaningful instead of cosmetic.
-
-## What each service's healthcheck would check
-
-### Traefik
-`traefik` doesn't have a dedicated health endpoint enabled by default, but
-exposes a `/ping` endpoint when `--ping=true` is set (on the traefik entrypoint
-or its own). Command would be something like:
-```yaml
-healthcheck:
-  test: ["CMD", "traefik", "healthcheck", "--ping"]
-  interval: 30s
-  timeout: 5s
-  retries: 3
-```
-Requires adding `--ping=true` to Traefik's command args first.
+Two services: Homepage and Jellyfin.
 
 ### Homepage
-No official built-in healthcheck endpoint documented as of the pinned
-version — likely needs a raw HTTP check against `/` on its internal port
-(3000), e.g.:
+
+No documented built-in health endpoint for the pinned version, so a raw HTTP check against
+its internal port:
+
 ```yaml
 healthcheck:
   test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/"]
@@ -53,11 +29,17 @@ healthcheck:
   timeout: 5s
   retries: 3
 ```
-Needs confirming `wget` (or `curl`) actually exists in the Homepage image —
-some slim images ship neither.
+
+Confirm `wget` or `curl` actually exists in the image first — some slim images ship
+neither.
+
+Homepage binds host `:80` and is the entrypoint to everything, so it is the service where
+"running but wedged" is most user-visible. Best candidate to do first.
 
 ### Jellyfin
-Jellyfin exposes a `/health` endpoint on its web port. Likely:
+
+Exposes `/health` on its web port:
+
 ```yaml
 healthcheck:
   test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
@@ -66,20 +48,20 @@ healthcheck:
   retries: 3
   start_period: 60s
 ```
-`start_period` matters here — Jellyfin's startup (library scan, plugin load)
-can take longer than a typical `interval`/`retries` window would tolerate
-before falsely flagging unhealthy. Needs confirming `curl` exists in the
-Jellyfin image (it's a fuller image than most \*arr apps, likely does).
 
-All of the above commands/endpoints need verifying against the actual pinned
-image versions before landing — this doc is a starting point, not
-copy-paste-ready config.
+`start_period` matters — startup (library scan, plugin load) can outlast a normal
+interval/retries window and get falsely flagged unhealthy.
 
-## Open questions for this session
-- Once healthchecks exist, do you want `depends_on` conditions upgraded to
-  `service_healthy` (e.g. Homepage waits for Traefik to be healthy, not just
-  started) — or is that unnecessary given Traefik's dynamic discovery means
-  Homepage doesn't actually need to wait on it?
-- Any interest in surfacing healthcheck status on the Homepage dashboard
-  itself (it can show container status via the existing Docker socket
-  integration) once these exist?
+Note that Jellyfin runs with `network_mode: host`, so `localhost:8096` inside the container
+is the host's `:8096`. Fine for this check, but not the usual container-local semantics.
+
+## Before landing
+
+Verify every command and endpoint against the actual pinned images — this file is a
+starting point, not copy-paste-ready config. Check that the binary used in `test:` exists
+in the image, and confirm the endpoint responds on a running container:
+
+```bash
+docker exec homepage which wget curl
+docker exec jellyfin curl -fsS http://localhost:8096/health
+```
