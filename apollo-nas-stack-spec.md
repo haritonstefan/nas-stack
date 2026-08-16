@@ -127,8 +127,15 @@ nothing.
 
 ### DLNA
 
-DLNA is a **plugin** as of Jellyfin 10.10, not core: Dashboard → Plugins → Catalog → DLNA →
-install → restart. Until then DLNA browsing does not work regardless of networking.
+DLNA is a **plugin** as of Jellyfin 10.10, not core. Until it is installed *and loaded*,
+DLNA browsing does not work regardless of networking.
+
+`jellyfin-bootstrap.sh` installs it over the API rather than through the dashboard: it
+resolves the entry in `GET /Packages` (the display name is never hardcoded), posts to
+`/Packages/Installed/{name}`, then polls `GET /Plugins` — the install is asynchronous, so
+the `204` means *queued*, not installed. Jellyfin does not hot-load plugins, so a new one
+reports `Status: Restart` and is activated by the deferred restart the base URL already
+uses, rather than a restart mid-bootstrap. `JELLYFIN_INSTALL_DLNA=0` skips the step.
 
 DLNA has no authentication — anything on the LAN can browse exposed libraries. The TV and
 NAS must be on the **same layer-2 segment**; multicast does not cross VLANs, and many APs

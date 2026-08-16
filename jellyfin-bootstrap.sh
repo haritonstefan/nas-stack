@@ -348,9 +348,19 @@ if [ "${JELLYFIN_INSTALL_DLNA:-1}" = "1" ]; then
         Active)
           echo "    ${name}: already active, skipping"
           return 0 ;;
-        Restart|Superseded|Superceded)
+        Restart)
+          # Only "Restart" justifies asking for another bounce. If the plugin is
+          # still saying this *after* a restart it will never load, and silently
+          # re-requesting would bounce Jellyfin on every up.sh run forever.
           echo "    ${name}: installed, awaiting restart"
+          dlna_warn "if ${name} still reports \"Restart\" after a restart, it is"
+          dlna_warn "failing to load — check docker logs jellyfin."
           RESTART_NEEDED=1
+          return 0 ;;
+        Superseded|Superceded)
+          # A newer version is present. Not evidence that a restart changes
+          # anything, so this must not set RESTART_NEEDED.
+          echo "    ${name}: superseded by a newer version, leaving as-is"
           return 0 ;;
         Disabled)
           guid=$(printf '%s' "$entry" | jq -r '.Id')
