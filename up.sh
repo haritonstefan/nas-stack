@@ -283,14 +283,15 @@ if want jellyfin; then
     else
       # Not piped: keeps stdout/stderr separate and unbuffered, so a failure's
       # diagnostics arrive in the right order for debugging.
-      # Exit 10 means it cleared a BaseUrl and a restart is needed; 0 means
-      # nothing to activate. Anything else is a real failure.
+      # Exit 10 means something needs a restart to take effect (a cleared
+      # BaseUrl, a newly installed DLNA plugin, or both); 0 means nothing to
+      # activate. Anything else is a real failure.
       BOOTSTRAP_RC=0
       # shellcheck disable=SC2086
       ./jellyfin-bootstrap.sh $BOOTSTRAP_ARGS || BOOTSTRAP_RC=$?
       case "$BOOTSTRAP_RC" in
         0)  info "no restart needed" ;;
-        10) say "Restarting Jellyfin to apply the cleared base URL"
+        10) say "Restarting Jellyfin to apply pending changes"
             docker restart jellyfin >/dev/null
             info "restarted" ;;
         *)  echo "ERROR: jellyfin-bootstrap.sh failed (exit ${BOOTSTRAP_RC})." >&2

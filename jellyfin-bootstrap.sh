@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Configures a fresh Jellyfin instance over the API: server name, admin user,
-# libraries, Intel QSV hardware transcoding, and asserts an empty base URL.
-# Idempotent — safe to re-run.
+# libraries, Intel QSV hardware transcoding, the DLNA plugin, and asserts an
+# empty base URL. Idempotent — safe to re-run.
 #
 # Run AFTER `docker compose ... up -d` on a fresh (never-configured) Jellyfin.
 # The /Startup/* endpoints are only reachable while the wizard is incomplete,
@@ -309,13 +309,151 @@ api POST /System/Configuration/encoding "$(printf '%s' "$ENC" | jq \
    | .HardwareDecodingCodecs = ["h264","vc1","vp8","hevc","mpeg2video","vp9"]')" >/dev/null
 echo "    QSV on /dev/dri/renderD128"
 
+RESTART_NEEDED=0
+
+if [ "${JELLYFIN_INSTALL_DLNA:-1}" = "1" ]; then
+  echo "==> Installing the DLNA plugin"
+  # DLNA is a plugin as of 10.10, not core. Jellyfin does not hot-load plugins:
+  # a freshly installed one sits at status "Restart" until the process comes
+  # back. So nothing here restarts mid-run — the work is folded into the same
+  # deferred restart the base URL already uses (exit 10), which up.sh performs
+  # before the library scan.
+  #
+  # Every call below is non-fatal on purpose: `api` returns 22 under `set -e`,
+  # and a plugin that fails to install must not abort the run before the base
+  # URL is asserted. Each step captures its own rc and warns instead.
+  dlna_warn() { echo "    WARNING: $1" >&2; }
+
+  install_dlna() {
+    local rc=0 pkgs pkg name guid plugins entry status version
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "    [dry-run] GET /Packages, then POST /Packages/Installed/<DLNA>" >&2
+      echo "    [dry-run] poll GET /Plugins until it appears" >&2
+      return 0
+    fi
+
+    plugins=$(api GET /Plugins) || return 0
+
+    # PluginInfo is PascalCase (Id/Name/Status/Version); PackageInfo below is
+    # camelCase (name/guid/versions). Same feature, two casings — matching the
+    # wrong one fails silently as "never appeared", not as an error.
+    entry=$(printf '%s' "$plugins" \
+      | jq -c 'map(select(.Name | test("dlna"; "i"))) | first // empty')
+
+    if [ -n "$entry" ]; then
+      status=$(printf '%s' "$entry" | jq -r '.Status // "?"')
+      name=$(printf '%s' "$entry" | jq -r '.Name')
+      case "$status" in
+        Active)
+          echo "    ${name}: already active, skipping"
+          return 0 ;;
+        Restart|Superseded|Superceded)
+          echo "    ${name}: installed, awaiting restart"
+          RESTART_NEEDED=1
+          return 0 ;;
+        Disabled)
+          guid=$(printf '%s' "$entry" | jq -r '.Id')
+          version=$(printf '%s' "$entry" | jq -r '.Version')
+          api POST "/Plugins/${guid}/${version}/Enable" >/dev/null || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            dlna_warn "${name} is disabled and could not be enabled."
+            return 0
+          fi
+          echo "    ${name}: re-enabled"
+          RESTART_NEEDED=1
+          return 0 ;;
+        *)
+          # Malfunctioned / NotSupported / Deleted. Installed but not working —
+          # must not read as success.
+          dlna_warn "${name} is installed but its status is \"${status}\"."
+          dlna_warn "Check Dashboard -> Plugins, and docker logs jellyfin."
+          return 0 ;;
+      esac
+    fi
+
+    # Not installed. Resolve the catalog entry rather than hardcoding a display
+    # name — it is the {name} path segment of the install call and an exact
+    # match is required.
+    pkgs=$(api GET /Packages) || return 0
+    pkg=$(printf '%s' "$pkgs" \
+      | jq -c 'map(select(.name | test("dlna"; "i")))')
+
+    local count
+    count=$(printf '%s' "$pkg" | jq 'length')
+    if [ "$count" -eq 0 ]; then
+      if [ "$(printf '%s' "$pkgs" | jq 'length')" -eq 0 ]; then
+        # An empty catalog is a different failure from a catalog without DLNA:
+        # no repository configured, or the NAS cannot reach repo.jellyfin.org.
+        dlna_warn "the plugin catalog is empty — Jellyfin could not reach its"
+        dlna_warn "repository. Check egress and Dashboard -> Plugins -> Repositories."
+      else
+        dlna_warn "no DLNA plugin in the catalog. Available:"
+        printf '%s' "$pkgs" | jq -r '.[].name' | sed 's/^/             /' >&2
+      fi
+      return 0
+    fi
+    if [ "$count" -gt 1 ]; then
+      dlna_warn "${count} catalog entries match \"dlna\" — not guessing:"
+      printf '%s' "$pkg" | jq -r '.[].name' | sed 's/^/             /' >&2
+      return 0
+    fi
+
+    name=$(printf '%s' "$pkg" | jq -r '.[0].name')
+    guid=$(printf '%s' "$pkg" | jq -r '.[0].guid')
+
+    # No version pinned: Jellyfin picks the build matching this server's ABI,
+    # which is a better judge of compatibility than a string compare here.
+    api POST "/Packages/Installed/$(urlencode "$name")" >/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      dlna_warn "could not start the install of \"${name}\"."
+      return 0
+    fi
+
+    # 204 only means the download was QUEUED. The install completes
+    # asynchronously, and a failure past this point surfaces only in the
+    # Jellyfin log — so poll /Plugins for the package guid rather than trusting
+    # the status code.
+    echo "    ${name}: install queued, waiting for it to land"
+    local i
+    for i in $(seq 1 30); do
+      sleep 2
+      plugins=$(api GET /Plugins) || continue
+      entry=$(printf '%s' "$plugins" \
+        | jq -c --arg id "$guid" 'map(select((.Id // "") | ascii_downcase == ($id | ascii_downcase))) | first // empty')
+      if [ -n "$entry" ]; then
+        status=$(printf '%s' "$entry" | jq -r '.Status // "?"')
+        version=$(printf '%s' "$entry" | jq -r '.Version // "?"')
+        case "$status" in
+          Active|Restart|Superseded|Superceded)
+            echo "    ${name} ${version}: installed (status ${status})"
+            RESTART_NEEDED=1 ;;
+          *)
+            dlna_warn "${name} installed but its status is \"${status}\"."
+            dlna_warn "Check docker logs jellyfin." ;;
+        esac
+        return 0
+      fi
+    done
+
+    dlna_warn "\"${name}\" did not appear in /Plugins after 60s."
+    dlna_warn "The download may still be running. Check docker logs jellyfin,"
+    dlna_warn "then re-run this script — it will pick up where this left off."
+  }
+
+  install_dlna
+else
+  echo "==> DLNA plugin install skipped (JELLYFIN_INSTALL_DLNA=0)"
+fi
+
 echo "==> Ensuring base URL is empty (serving from root)"
 NET=$(api GET /System/Configuration/network)
 [ "$DRY_RUN" -eq 1 ] && NET='{}'
 CURRENT_BASE=$(printf '%s' "$NET" | jq -r '.BaseUrl // ""')
 if [ -z "$CURRENT_BASE" ]; then
+  # Not `RESTART_NEEDED=0`: the DLNA step above may already have set it, and
+  # this branch is only evidence about the base URL.
   echo "    already empty, skipping"
-  RESTART_NEEDED=0
 else
   api POST /System/Configuration/network "$(printf '%s' "$NET" \
     | jq '.BaseUrl = ""')" >/dev/null
@@ -329,16 +467,14 @@ cat <<EOF
 EOF
 if [ "${RESTART_NEEDED}" -eq 1 ]; then
   cat <<EOF
-    Restart for the cleared base URL to take effect:
+    A restart is needed to apply the changes above:
       docker restart jellyfin
+    (up.sh does this for you, then triggers the library scan.)
 EOF
 fi
 cat <<EOF
     Jellyfin: ${JELLYFIN_URL%/}
       (also on the LAN as http://apollo.local:8096)
-
-    Still manual: Dashboard -> Plugins -> Catalog -> DLNA (if you want Jellyfin
-    to serve DLNA in place of UGOS's disabled responder).
 EOF
 
 # Exit 10 = success, and a restart is required. Lets up.sh restart only when

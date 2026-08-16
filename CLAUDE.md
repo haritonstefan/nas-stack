@@ -117,4 +117,4 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
   ```
 
 - Logs live in `/volume2/docker/jellyfin/config/log/` — inside the directory a reset wipes. Grab them first.
-- Still manual: Dashboard → Plugins → Catalog → DLNA plugin.
+- **DLNA is a plugin** (not core since 10.10) and bootstrap installs it: resolve it in `GET /Packages` (never hardcode the name), `POST /Packages/Installed/{name}`, then poll `GET /Plugins`. The `204` only means *queued* — a failure past it shows up only in the Jellyfin log. Casing differs per endpoint: `PackageInfo` is camelCase (`name`/`guid`), `PluginInfo` is PascalCase (`Name`/`Id`/`Status`). **No mid-run restart** — Jellyfin does not hot-load plugins, so a new one sits at `Status: Restart` and rides the existing deferred-restart channel (`exit 10` → `up.sh` restarts → scan). Every DLNA call is non-fatal: a failed install must not abort before the base URL is asserted. `JELLYFIN_INSTALL_DLNA=0` skips it.
