@@ -326,7 +326,4 @@ if want core; then
 fi
 if want jellyfin; then
   info "Jellyfin:          http://apollo.local:8096"
-  printf '\n'
-  info "Still manual: Jellyfin Dashboard -> Plugins -> Catalog -> DLNA, if you"
-  info "want Jellyfin to serve DLNA in place of UGOS's disabled responder."
 fi

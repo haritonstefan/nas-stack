@@ -143,9 +143,22 @@ block it by default. That is the most common cause of DLNA not appearing.
 
 ### Jellyfin's own network settings
 
-- LAN networks: restrict to the local subnet.
-- Known proxies: none — nothing proxies Jellyfin.
-- Base URL: empty.
+All three live on the same `NetworkConfiguration` object, which deserializes over
+the whole object — so `jellyfin-bootstrap.sh` sets them in one GET-modify-POST,
+never as separate partial bodies.
+
+- **LAN networks**: restricted to the local subnet (`JELLYFIN_LOCAL_SUBNET`,
+  `192.168.0.0/24`). This is what Jellyfin uses to decide which clients are local,
+  which gates LAN-only behaviour like bitrate limits and DLNA visibility.
+  **This reclassifies tailnet clients as remote** (§9): left empty, Jellyfin infers
+  local networks from its own interfaces, and host networking meant that included
+  the tailscale interface. They still connect — remote access is enabled — but a
+  remote-bitrate limit added later would apply to tailnet playback too.
+- **Known proxies**: none — nothing proxies Jellyfin, and a stray entry would make
+  it trust `X-Forwarded-For` from anyone. Set explicitly to empty rather than left
+  at the default.
+- **Base URL**: empty, and settled **last** within that single POST — a non-empty
+  value relocates the entire API under the prefix, so no call may follow it.
 
 ---
 
@@ -172,19 +185,26 @@ Config on the **SSD**; nothing that spins up the HDD at idle belongs there. Medi
 Compose files must not hardcode these paths — they come from `<tier>.env` (gitignored,
 with `<tier>.env.example` as the template).
 
-### btrfs copy-on-write
+### btrfs copy-on-write — not applicable here
 
-If `/volume2` is btrfs, disabling CoW on database and cache directories avoids
-fragmentation and write amplification. Confirm the filesystem first — on ext4/xfs this is a
-no-op:
+**Settled: `/volume2` is ext4, not btrfs.** Confirmed on the box:
 
-```bash
-findmnt -T /volume2/docker -o TARGET,SOURCE,FSTYPE
+```
+$ findmnt -T /volume2/docker -o TARGET,SOURCE,FSTYPE
+TARGET   SOURCE                                         FSTYPE
+/volume2 /dev/mapper/ug_A9B5AA_1786551201_pool2-volume1 ext4
 ```
 
-**`chattr +C` only takes effect on an empty directory**, so it must be applied at creation,
-before any data is written. Verify with `lsattr -d`. This disables checksums on those
-paths — acceptable for SQLite and transcode scratch. Never apply it to the media library.
+`chattr +C` is a btrfs-only attribute, so there is nothing to disable and `up.sh`
+correctly does not try. `lsattr -d` on the config and cache directories shows only
+`e` (extent mapping), the normal ext4 flag.
+
+Kept as a note because it is a real concern *if the storage layout ever changes*: on
+btrfs, disabling CoW on database and cache directories avoids fragmentation and write
+amplification, **`chattr +C` only takes effect on an empty directory** so it must be
+applied at creation, and it disables checksums on those paths — acceptable for SQLite
+and transcode scratch, never for the media library. Re-run the `findmnt` above before
+assuming any of that applies.
 
 ---
 
@@ -197,11 +217,13 @@ dashboard is a derived artifact of the stack definition — adding a service add
 with no dashboard config to maintain. Labels alone suffice; `server` and `container` are
 inferred.
 
-Two config files, installed by `up.sh` only when absent so on-NAS edits survive:
+Three config files, installed by `up.sh` only when absent so on-NAS edits survive:
 
 - `docker.yaml` — declares the socket, enabling container status and stats.
 - `services.yaml` — for things that are **not containers on this host** and so cannot be
   auto-discovered (UGOS at `apollo.local:9999`). Containers must not be listed here.
+- `bookmarks.yaml` — intentionally empty. Homepage writes its own sample Developer/Social/
+  Entertainment bookmarks when the file is absent; installing an empty one suppresses them.
 
 `HOMEPAGE_ALLOWED_HOSTS` must list **every** name and address Homepage is reached at — the
 mDNS name, the LAN IP, any tailnet name. These are the NAS's own addresses, not the
@@ -217,6 +239,21 @@ socket file, not the Engine API through it — anything compromising Homepage ca
 privileged container. Accepted for a single-user LAN, because the socket is what makes
 tiles self-maintaining. Mediating access to the socket is the mitigation if that trade
 stops holding.
+
+Reaching the socket is a **DAC problem**, and the mechanism is load-bearing enough to
+pin down: the socket is `root:docker` `0660`, so Homepage sets its identity with
+`user: "${PUID}:${DOCKER_GID}"` — its **primary GID** is the host docker group.
+
+- Not the image's `PUID`/`PGID`: those are applied inside the entrypoint, after the
+  point where `docker inspect` could show what identity the server process ended up with.
+- Not `group_add`: a supplementary GID can be discarded by a privilege drop. A primary
+  GID survives, and matching the socket's group needs no `DAC_OVERRIDE`.
+- `/app/config` is owned by `PUID`, so it stays writable.
+
+When this fails, **no container is listed at all** and Homepage renders only
+`services.yaml` — it looks like one service being ignored, not a dead integration.
+Diagnose by mechanism: `ENOENT` means the path is wrong, `EACCES` means the socket was
+found and refused.
 Homepage is the only externally-reachable service in `core`: pin it, update deliberately.
 
 ---

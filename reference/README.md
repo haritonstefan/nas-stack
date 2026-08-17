@@ -5,17 +5,24 @@ probing a live service.
 
 ## `jellyfin-openapi.json`
 
-Jellyfin's OpenAPI spec, from
-`https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json`
-(fetched 2026-08-15). 294 paths, 357 schemas.
+Jellyfin's OpenAPI spec. **Now fetched from the running server**, which is the
+only copy guaranteed to match the deployed binary:
 
-**Version trap:** this document reports `info.version: 12.0.0`. That is the
-version of the *spec document*, not of Jellyfin — the server release line is
-10.x and there is no Jellyfin 12. The stack is pinned to `10.11.11`, the newest
-published image. So the spec runs **ahead** of the deployed server: treat it as
-a strong hint, not proof, and confirm against the running instance when a
-detail matters. (The known case where they disagree: `POST /Startup/User` is
-documented here but 404s on 10.11.11 — see "Open / future items" in CLAUDE.md.)
+```sh
+curl -sS http://apollo.local:8096/api-docs/openapi.json -o reference/jellyfin-openapi.json
+```
+
+`jq -r '.info.version'` currently reports **`10.11.11`**, matching the pinned
+image — so this copy describes the running server exactly.
+
+**Version trap to watch for on refresh:** the upstream published spec
+(`api.jellyfin.org/openapi/jellyfin-openapi-stable.json`) reports
+`info.version: 12.0.0` — the version of the *spec document*, not of Jellyfin;
+the server line is 10.x and there is no Jellyfin 12. If `.info.version` ever
+reads `12.0.0` again, this file came from upstream rather than the server and
+runs **ahead** of what is deployed: treat it as a hint, not proof. (The known
+disagreement: `POST /Startup/User` is documented with no 404 response, yet 404s
+on a fresh config when `GET /Startup/User` has not run first — see CLAUDE.md.)
 
 **Don't read this file with WebFetch or `Read`** — it's ~1.9MB on one line, so
 it truncates alphabetically, before `/Startup`. Query it with `jq`:
@@ -36,9 +43,10 @@ jq '.components.schemas.StartupUserDto' reference/jellyfin-openapi.json
 jq -r '.paths["/Startup/User"].post.security' reference/jellyfin-openapi.json
 ```
 
-Refresh with:
+Refresh from the running server, then confirm the version matches the pinned
+image — a copy reading `12.0.0` came from upstream and describes another branch:
 
 ```sh
-curl -fsSL -o reference/jellyfin-openapi.json \
-  https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json
+curl -sS http://apollo.local:8096/api-docs/openapi.json -o reference/jellyfin-openapi.json
+jq -r '.info.version' reference/jellyfin-openapi.json   # expect 10.11.11
 ```

@@ -3,10 +3,8 @@ services:
     image: jellyfin/jellyfin:10.11.11
     container_name: jellyfin
     restart: unless-stopped
-    # Host networking: SSDP (1900/udp) and client auto-discovery (7359/udp) are
-    # multicast/broadcast, which Docker bridge port publishing does not forward —
-    # confirmed empirically. Jellyfin binds 8096, 7359 and 1900 on the host
-    # directly, so `ports:` does not apply here.
+    # Required for SSDP/broadcast discovery; `ports:` does not apply and must
+    # never be added. See spec section 5.
     network_mode: host
     user: "${PUID:-1000}:${PGID:-10}"
     group_add:

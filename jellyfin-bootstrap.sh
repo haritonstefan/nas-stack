@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Configures a fresh Jellyfin instance over the API: server name, admin user,
-# libraries, Intel QSV hardware transcoding, the DLNA plugin, and asserts an
-# empty base URL. Idempotent — safe to re-run.
+# libraries, Intel QSV hardware transcoding, the DLNA plugin, and the network
+# settings (LAN subnets, no known proxies, empty base URL). Idempotent — safe
+# to re-run.
 #
 # Run AFTER `docker compose ... up -d` on a fresh (never-configured) Jellyfin.
 # The /Startup/* endpoints are only reachable while the wizard is incomplete,
@@ -10,11 +11,6 @@
 #   ./jellyfin-bootstrap.sh
 #   ./jellyfin-bootstrap.sh --dry-run
 #   JELLYFIN_URL=http://apollo.local:8096 ./jellyfin-bootstrap.sh
-#
-# Jellyfin serves from the root of its own port, so BaseUrl must stay empty.
-# The script asserts that LAST: a non-empty value
-# would move the whole API under that prefix, so no call may follow it. Changing
-# it needs a container restart to take effect.
 #
 # Requires: curl, jq. Reads jellyfin.env if present (for JELLYFIN_ADMIN_*).
 
@@ -456,18 +452,39 @@ else
   echo "==> DLNA plugin install skipped (JELLYFIN_INSTALL_DLNA=0)"
 fi
 
-echo "==> Ensuring base URL is empty (serving from root)"
+echo "==> Network settings (LAN subnets, proxies, base URL)"
+# All three live on NetworkConfiguration, which deserializes over the whole
+# object — hence one GET-modify-POST, and BaseUrl settled here, last.
 NET=$(api GET /System/Configuration/network)
 [ "$DRY_RUN" -eq 1 ] && NET='{}'
+
 CURRENT_BASE=$(printf '%s' "$NET" | jq -r '.BaseUrl // ""')
-if [ -z "$CURRENT_BASE" ]; then
+CURRENT_SUBNETS=$(printf '%s' "$NET" | jq -c '.LocalNetworkSubnets // []')
+CURRENT_PROXIES=$(printf '%s' "$NET" | jq -c '.KnownProxies // []')
+
+# KnownProxies stays empty: a stray entry makes Jellyfin trust X-Forwarded-For
+# from anyone.
+DESIRED_SUBNETS=$(jq -cn --arg s "${JELLYFIN_LOCAL_SUBNET:-192.168.0.0/24}" '[$s]')
+
+NEW_NET=$(printf '%s' "$NET" | jq \
+  --argjson subnets "$DESIRED_SUBNETS" \
+  '.LocalNetworkSubnets = $subnets | .KnownProxies = [] | .BaseUrl = ""')
+
+# UNVERIFIED: if Jellyfin normalizes LocalNetworkSubnets on write this never
+# matches, and every up.sh run then restarts and rescans the HDD. Confirm by
+# running up.sh twice — the second must say "already correct, skipping".
+if [ "$CURRENT_BASE" = "" ] \
+   && [ "$CURRENT_SUBNETS" = "$DESIRED_SUBNETS" ] \
+   && [ "$CURRENT_PROXIES" = "[]" ]; then
   # Not `RESTART_NEEDED=0`: the DLNA step above may already have set it, and
-  # this branch is only evidence about the base URL.
-  echo "    already empty, skipping"
+  # this branch is only evidence about the network config.
+  echo "    already correct, skipping"
 else
-  api POST /System/Configuration/network "$(printf '%s' "$NET" \
-    | jq '.BaseUrl = ""')" >/dev/null
-  echo "    cleared"
+  api POST /System/Configuration/network "$NEW_NET" >/dev/null
+  [ "$CURRENT_SUBNETS" = "$DESIRED_SUBNETS" ] \
+    || echo "    LAN subnets: $(printf '%s' "$DESIRED_SUBNETS" | jq -r 'join(", ")')"
+  [ "$CURRENT_PROXIES" = "[]" ] || echo "    known proxies: cleared"
+  [ -z "$CURRENT_BASE" ] || echo "    base URL: cleared"
   RESTART_NEEDED=1
 fi
 
