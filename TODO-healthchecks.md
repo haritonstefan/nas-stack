@@ -1,7 +1,9 @@
 # Healthchecks — open
 
-No service in either stack defines a `healthcheck:`. This is the only genuinely open item
-in the repo.
+No service in either stack defines a `healthcheck:` in the compose files. This is the
+only genuinely open item in the repo. (Exception that needs no work: byparr's image ships
+its own `HEALTHCHECK` — `curl http://127.0.0.1:8191/health`, 15m interval — so it already
+reports healthy/unhealthy without a compose-level entry.)
 
 ## Why bother
 

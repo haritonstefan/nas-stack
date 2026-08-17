@@ -215,7 +215,7 @@ done
 # A container started outside the -p convention lives under a different project
 # name and is missed by the calls above; clean up by name as a backstop.
 say "Removing any stray containers by name"
-for c in homepage jellyfin sonarr radarr prowlarr qbittorrent flaresolverr configarr ofelia; do
+for c in homepage jellyfin sonarr radarr prowlarr qbittorrent byparr configarr ofelia; do
   if docker ps -aq -f "name=^${c}$" | grep -q .; then
     run docker rm -f "$c" >/dev/null
     info "removed ${c}"

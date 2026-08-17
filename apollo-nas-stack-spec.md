@@ -333,7 +333,9 @@ No routing config, no name registration — publish the port, add the labels.
 
 ### The arr stack as built
 
-Sonarr, Radarr, Prowlarr and qBittorrent, plus Flaresolverr (no published port, so no tile),
+Sonarr, Radarr, Prowlarr and qBittorrent, plus Byparr (no published port, so no tile —
+the Cloudflare solver, replacing FlareSolverr, which stopped clearing modern managed
+challenges; same API, so Prowlarr registers it as a FlareSolverr-type indexer proxy),
 Configarr (no port, run-to-completion) and Ofelia (the scheduler that starts it). All bridge
 services on `nas-net`; only Jellyfin needs host networking.
 

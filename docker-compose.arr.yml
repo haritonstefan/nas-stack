@@ -152,14 +152,20 @@ services:
       - homepage.widget.password=${QBITTORRENT_PASSWORD:?QBITTORRENT_PASSWORD is unset — run up.sh to generate it}
 
   # No published port and no homepage labels: internal-only, so a tile would be
-  # a dead end. Inert until an indexer is tagged to it in Prowlarr.
-  flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.5.0
-    container_name: flaresolverr
+  # a dead end. Registered as Prowlarr's indexer proxy by arr-bootstrap.sh;
+  # Prowlarr calls it only when a Cloudflare challenge is detected on a tagged
+  # indexer. Speaks the FlareSolverr /v1 API (GET-only — request.post is
+  # accepted but treated as a GET; fine here, the CF-protected trackers all
+  # search via GET). Image ships its own /health-based HEALTHCHECK.
+  byparr:
+    image: ghcr.io/thephaseless/byparr:v3.0.3
+    container_name: byparr
     restart: unless-stopped
+    # Firefox/Camoufox needs more than Docker's 64 MB /dev/shm default;
+    # upstream's guidance is 512 MB.
+    shm_size: 512mb
     environment:
       TZ: ${TZ:-Europe/Bucharest}
-      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
     networks:
       - nas-net
     logging:
@@ -171,7 +177,7 @@ services:
   # Applies the TRaSH quality profiles and custom formats. Run to completion,
   # not a daemon: ofelia below starts it on a schedule, and arr-bootstrap.sh
   # runs the first sync at bring-up. No published port and no homepage labels,
-  # for the same reason as flaresolverr.
+  # for the same reason as byparr.
   #
   # `profiles:` keeps it out of a plain `up -d`. This stack has no depends_on,
   # so an auto-started sync would race Sonarr and Radarr's startup and, with

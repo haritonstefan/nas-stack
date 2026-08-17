@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Configures a fresh arr stack over the APIs: root folders, the qBittorrent
 # download client, media-management settings, Prowlarr's app sync to Sonarr and
-# Radarr, the public and private indexers, and a one-shot Configarr sync.
+# Radarr, the Byparr indexer proxy (with its tag on every indexer), the public
+# and private indexers, and a one-shot Configarr sync.
 # Idempotent — safe to re-run.
 #
 # Private indexers are listed in ARR_INDEXERS_PRIVATE, with credentials read
@@ -82,6 +83,7 @@ ARR_RUN_CONFIGARR="${ARR_RUN_CONFIGARR:-1}"
 SONARR_INTERNAL_URL="http://sonarr:8989"
 RADARR_INTERNAL_URL="http://radarr:7878"
 PROWLARR_INTERNAL_URL="http://prowlarr:9696"
+BYPARR_INTERNAL_URL="http://byparr:8191"
 QBITTORRENT_HOST="qbittorrent"
 
 for cmd in curl jq; do
@@ -445,6 +447,112 @@ add_application Sonarr Sonarr "$SONARR_INTERNAL_URL" "$SONARR_API_KEY" \
 add_application Radarr Radarr "$RADARR_INTERNAL_URL" "$RADARR_API_KEY" \
   '.fields += [{name: "syncCategories", value: [2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,2090]}]'
 
+# --- byparr indexer proxy ------------------------------------------------------
+
+say "Registering Byparr as Prowlarr's indexer proxy"
+# Prowlarr routes a request through the proxy only when it detects a Cloudflare
+# challenge AND the indexer shares a tag with the proxy — so tagging every
+# indexer costs nothing on unprotected trackers and future-proofs any that add
+# Cloudflare later. Byparr is registered under the FlareSolverr implementation:
+# it speaks that API. It is GET-only — Prowlarr's request.post degrades to a
+# GET — acceptable because the Cloudflare-protected trackers here search via GET.
+#
+# Non-fatal throughout, like the indexers: a solver that cannot be registered
+# must not abort the run before Configarr gets its turn.
+BYPARR_TAG_ID=""
+setup_byparr_proxy() {
+  local tags entry existing indexers id name rc=0
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    info "[dry-run] ensure tag 'byparr'; GET /api/v1/indexerproxy/schema, then POST the"
+    info "[dry-run] FlareSolverr implementation with host ${BYPARR_INTERNAL_URL}; tag every indexer"
+    return 0
+  fi
+
+  # Tag first: a proxy with no matching tagged indexer is dead weight and a
+  # Prowlarr health warning, so without the tag the whole section is skipped.
+  tags=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/tag) || {
+    warn "could not list Prowlarr's tags — skipping the Byparr proxy"
+    return 0
+  }
+  # Prowlarr lowercases tag labels on create, so match the stored form.
+  BYPARR_TAG_ID=$(printf '%s' "$tags" \
+    | jq -r 'map(select(.label == "byparr")) | first | .id // empty')
+  if [ -n "$BYPARR_TAG_ID" ]; then
+    info "tag 'byparr': exists (id ${BYPARR_TAG_ID})"
+  else
+    BYPARR_TAG_ID=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/tag \
+      '{"label":"byparr"}' | jq -r '.id // empty') || BYPARR_TAG_ID=""
+    if [ -z "$BYPARR_TAG_ID" ]; then
+      warn "could not create the 'byparr' tag — skipping the Byparr proxy"
+      return 0
+    fi
+    info "tag 'byparr': created (id ${BYPARR_TAG_ID})"
+  fi
+
+  existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexerproxy \
+    | jq -r '.[].name // empty') || existing=""
+  if printf '%s\n' "$existing" | grep -Fxq "Byparr"; then
+    info "proxy: exists, skipping"
+  else
+    # GET-schema-modify-POST, the same mandatory pattern as the indexers: the
+    # resource mapper rejects hand-written bodies.
+    entry=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexerproxy/schema \
+      | jq -c 'map(select(.implementation == "FlareSolverr")) | first // empty') || entry=""
+    if [ -z "$entry" ]; then
+      warn "no FlareSolverr implementation in the indexerproxy schema — skipping the proxy"
+    else
+      entry=$(printf '%s' "$entry" \
+        | jq -c --arg host "$BYPARR_INTERNAL_URL" --argjson tag "$BYPARR_TAG_ID" '
+            .name = "Byparr" | .tags = [$tag]
+            | .fields |= map(if .name == "host" then .value = $host else . end)')
+      # No forceSave on the first try: the create-path test is the only automatic
+      # reachability check the proxy gets. Only when it fails (byparr still
+      # starting, most likely) is it saved untested, retestable from the UI.
+      rc=0
+      api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/indexerproxy \
+        "$entry" >/dev/null || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        warn "proxy connection test failed (details above) — saving untested"
+        rc=0
+        api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST '/api/v1/indexerproxy?forceSave=true' \
+          "$entry" >/dev/null || rc=$?
+      fi
+      if [ "$rc" -eq 0 ]; then
+        info "proxy: registered (host ${BYPARR_INTERNAL_URL}, tag 'byparr')"
+      else
+        warn "proxy could not be registered (exit ${rc})"
+      fi
+    fi
+  fi
+
+  # Retro-tag indexers from earlier runs (or added by hand), which predate the
+  # tag. New ones are born tagged in add_one below. GET-modify-PUT over the
+  # whole object — never a partial body — and forceSave because a tracker being
+  # down right now is not a reason to leave it untagged.
+  indexers=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexer) || {
+    warn "could not list indexers to retro-tag — new ones are still tagged on create"
+    return 0
+  }
+  printf '%s' "$indexers" \
+    | jq -c --argjson tag "$BYPARR_TAG_ID" '.[] | select((.tags // []) | index($tag) | not)' \
+    | while read -r entry; do
+        id=$(printf '%s' "$entry" | jq -r '.id')
+        name=$(printf '%s' "$entry" | jq -r '.name')
+        entry=$(printf '%s' "$entry" | jq -c --argjson tag "$BYPARR_TAG_ID" '.tags += [$tag]')
+        rc=0
+        api "$PROWLARR_URL" "$PROWLARR_API_KEY" PUT "/api/v1/indexer/${id}?forceSave=true" \
+          "$entry" >/dev/null || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          info "${name}: tagged 'byparr'"
+        else
+          warn "${name}: could not be tagged (exit ${rc})"
+        fi
+      done
+  return 0
+}
+setup_byparr_proxy
+
 # --- indexers ----------------------------------------------------------------
 
 if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
@@ -486,6 +594,12 @@ if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
       if [ -z "$entry" ]; then
         warn "${def}: not in Prowlarr's bundled definitions — skipping"
         return 0
+      fi
+
+      # Born tagged for the Byparr proxy (see setup_byparr_proxy above). Empty
+      # when the proxy section was skipped, in which case the tag is left alone.
+      if [ -n "$BYPARR_TAG_ID" ]; then
+        entry=$(printf '%s' "$entry" | jq -c --argjson tag "$BYPARR_TAG_ID" '.tags = [$tag]')
       fi
 
       if [ -n "$user" ]; then
