@@ -57,10 +57,11 @@ radarr:
 #
 #   root_folders          - configarr deletes and recreates them to match this
 #                           file; arr-bootstrap.sh adds them additively instead.
-#   download_clients      - would manage removeCompletedDownloads (must stay
-#                           false or the seed cap never fires and the SSD fills)
-#                           and the qBittorrent password, which up.sh seeds as a
-#                           PBKDF2 hash on first boot.
+#   download_clients      - the client definition is arr-bootstrap.sh's contract
+#                           (removeCompletedDownloads=true, paired with
+#                           ShareLimitAction=Stop in qBittorrent.conf), and
+#                           configarr would also rewrite the qBittorrent
+#                           password, which up.sh seeds as a PBKDF2 hash.
 #   delay_profiles        - deletes any profile not listed here.
 #   media_naming          - would rename the existing library, which keeps its
 #                           capitalised, non-TRaSH layout on purpose.

@@ -286,19 +286,33 @@ add_root_folder radarr "$RADARR_URL" "$RADARR_API_KEY" "$RADARR_ROOT_FOLDER"
 say "Adding the qBittorrent download client"
 add_download_client() {
   # add_download_client <name> <base-url> <api-key> <category-field> <category>
-  local name="$1" base="$2" key="$3" cat_field="$4" cat="$5" existing body
+  local name="$1" base="$2" key="$3" cat_field="$4" cat="$5" current desired body
+
+  # Seeding hand-off: qBittorrent.conf stops (not removes) the torrent at the
+  # ratio/time cap, and removeCompletedDownloads=true makes the arr app delete
+  # the torrent AND its files once qBittorrent reports it stopped at the cap —
+  # the app never removes a torrent that is still seeding, so the limits are
+  # honoured. The reverse split (qBittorrent RemoveWithContent) can delete a
+  # download before it has been imported. POST and PUT both test the client and
+  # reject a qBittorrent still configured to remove-at-limit — that rejection
+  # guards this pairing, so no forceSave here.
   if [ "$DRY_RUN" -eq 0 ]; then
-    existing=$(api "$base" "$key" GET /api/v3/downloadclient | jq -r '.[].name')
-    if printf '%s\n' "$existing" | grep -Fxq "qBittorrent"; then
-      info "${name}: qBittorrent exists, skipping"
+    current=$(api "$base" "$key" GET /api/v3/downloadclient \
+      | jq -c '[.[] | select(.name == "qBittorrent")] | first // empty')
+    if [ -n "$current" ]; then
+      if printf '%s' "$current" | jq -e '.removeCompletedDownloads == true' >/dev/null; then
+        info "${name}: qBittorrent exists, skipping"
+      else
+        # GET-modify-PUT over the whole object, never a partial body.
+        desired=$(printf '%s' "$current" | jq '.removeCompletedDownloads = true')
+        api "$base" "$key" PUT "/api/v3/downloadclient/$(printf '%s' "$current" | jq -r '.id')" \
+          "$desired" >/dev/null
+        info "${name}: qBittorrent updated (removal after seeding is now ${name}'s job)"
+      fi
       return 0
     fi
   fi
 
-  # removeCompletedDownloads MUST stay false. When true, the app tells
-  # qBittorrent to delete the torrent as soon as the import finishes, which
-  # stops seeding immediately — the seed ratio/time limits in qBittorrent.conf
-  # would never be reached. Removal is qBittorrent's job here, not the arr's.
   body=$(jq -n \
     --arg host "$QBITTORRENT_HOST" \
     --argjson port "$QBITTORRENT_PORT" \
@@ -310,7 +324,7 @@ add_download_client() {
       enable: true,
       protocol: "torrent",
       priority: 1,
-      removeCompletedDownloads: false,
+      removeCompletedDownloads: true,
       removeFailedDownloads: true,
       name: "qBittorrent",
       implementation: "QBittorrent",
@@ -333,7 +347,7 @@ add_download_client() {
     }')
 
   api "$base" "$key" POST /api/v3/downloadclient "$body" >/dev/null
-  info "${name}: qBittorrent added (category ${cat}, seeding left to qBittorrent)"
+  info "${name}: qBittorrent added (category ${cat}; removes torrent+data after the seed cap)"
 }
 
 add_download_client sonarr "$SONARR_URL" "$SONARR_API_KEY" tvCategory    tv-sonarr

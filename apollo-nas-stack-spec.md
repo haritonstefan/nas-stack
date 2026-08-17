@@ -216,8 +216,9 @@ is the intended trade:
   the same rule that keeps config off `/volume1`.
 - Cost: transient 2× space for the file being imported, one cross-filesystem copy per import,
   and `copyUsingHardlinks` is asserted in Sonarr/Radarr but inert.
-- The SSD would fill without a bound, so qBittorrent deletes torrents *and their content* at
-  ratio 2.0 or 14 days. That cap is the only thing draining the tree; see section 8.
+- The SSD would fill without a bound, so qBittorrent stops torrents at ratio 2.0 or 14 days
+  and Sonarr/Radarr then delete them *and their content*. That hand-off is the only thing
+  draining the tree; see section 8.
 
 The alternative — download tree under `/volume1` next to `Media/` — buys instant hardlinked
 imports and no duplicate space, at the cost of keeping the HDD awake for as long as anything
@@ -377,18 +378,28 @@ with a PBKDF2 hash (SHA-512, 100000 iterations, 16-byte salt, 64-byte key,
 qBittorrent **rewrites that file on clean shutdown**, so it is a first-boot seed, not ongoing
 config management — it is installed only when absent, and edits made on the NAS survive.
 
-The seed cap lives there too, and two details are easy to get wrong:
+The seed cap lives there too: `Session\ShareLimitAction=Stop`, so qBittorrent **stops** a
+torrent at `GlobalMaxRatio` / `GlobalMaxSeedingMinutes` and deletes nothing. Two config
+details are easy to get wrong:
 
 - The key is `Session\ShareLimitAction`. `MaxRatioAction` is obsolete.
 - The value is the enum's **string name**, not its integer — enums serialise via
-  `Utils::String::fromEnum`, so a numeric value fails to parse and silently falls back to the
-  default `Stop`, which only pauses and lets the SSD fill. The enum is non-sequential
-  (`Stop = 0`, `Remove = 1`, `EnableSuperSeeding = 2`, `RemoveWithContent = 3`), so guessing
-  the number is doubly unsafe. `RemoveWithContent` is the only value that frees space.
+  `Utils::String::fromEnum`, so a numeric value fails to parse and silently falls back to
+  the default. The enum is non-sequential (`Stop = 0`, `Remove = 1`,
+  `EnableSuperSeeding = 2`, `RemoveWithContent = 3`), so guessing the number is doubly
+  unsafe.
 
-Correspondingly, **`removeCompletedDownloads` is `false`** on the Sonarr/Radarr download
-clients: when true the arr app deletes the torrent right after import, so the ratio and time
-limits are never reached. Removal is qBittorrent's job in this design, not the arr's.
+Deletion is the arr apps' half of the hand-off: **`removeCompletedDownloads` is `true`** on
+the Sonarr/Radarr download clients, and the pinned versions only remove a torrent — *with*
+its files — once qBittorrent reports it stopped at the cap, never mid-seed. (The old caveat
+that this setting removed torrents right after import, defeating the cap, was v2-era
+behavior.) The rejected alternative, `ShareLimitAction=RemoveWithContent` with arr-side
+removal off, frees the same space but can delete a download the arr app has not imported
+yet — and Sonarr/Radarr's download-client POST/PUT refuses (HTTP 400) any qBittorrent
+configured to remove at the limit, so the pairing is enforced by their own validation.
+Accepted costs: torrents added outside the arr apps (or in a foreign category) stop at the
+cap but are never deleted, and a failed import holds its data on the SSD until resolved in
+the Activity queue rather than being silently reaped.
 
 ---
 
@@ -442,7 +453,7 @@ torrent is not a config artifact and is not reproducible from this repo.
 | `apollo.local` only | No per-name systemd units to maintain across OS updates | Service URLs carry port numbers |
 | Exact image pins | Reproducible; the daemon API is old enough that floating tags break | Manual update step |
 | Downloads on the SSD | Seeding never holds the media HDD awake | No hardlinks — every import is a full copy, transient 2× space |
-| Seeding capped at ratio 2 / 14 days | The only thing draining the SSD download tree | Torrents stop seeding on a fixed schedule, not by choice |
+| Seed cap stops; arr apps delete | Nothing is removed before import; the arr apps drain the SSD tree | Torrents outside the arr apps stop at the cap but are never deleted |
 | arr root folders on the existing `Media/` dirs | No migration of a live library; Jellyfin unchanged | Keeps the capitalised, non-TRaSH layout |
 | `PUID`/`PGID` as env for arr | What LinuxServer.io images support; no socket access to gate | Inconsistent with Homepage/Jellyfin's `user:` |
 | API keys generated into `arr.env` | Breaks the key-distribution cycle; bring-up is one pass | `arr.env` is the only copy and is load-bearing forever |
