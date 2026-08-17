@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Configures a fresh arr stack over the APIs: root folders, the qBittorrent
 # download client, media-management settings, Prowlarr's app sync to Sonarr and
-# Radarr, the public indexers, and a one-shot Configarr sync. Idempotent — safe
-# to re-run.
+# Radarr, the public and private indexers, and a one-shot Configarr sync.
+# Idempotent — safe to re-run.
+#
+# Private indexers are listed in ARR_INDEXERS_PRIVATE, with credentials read
+# from ARR_INDEXER_<NAME>_USER / ARR_INDEXER_<NAME>_PASS (<NAME> is the
+# definition name uppercased) — see arr.env.example. One missing credential
+# skips that indexer with a warning; it never aborts the run.
 #
 # Run AFTER `docker compose ... up -d`. Unlike Jellyfin's, nothing here is
 # one-shot: every step reads the current state first and skips what is already
@@ -67,7 +72,9 @@ QBITTORRENT_USER="${QBITTORRENT_USER:-admin}"
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-8080}"
 
 ARR_INSTALL_INDEXERS="${ARR_INSTALL_INDEXERS:-1}"
-ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv}"
+ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv,limetorrents,torlock,therarbg,knaben,glodls,magnetdl}"
+# No default: the credentials are secrets, so the list is opt-in via arr.env.
+ARR_INDEXERS_PRIVATE="${ARR_INDEXERS_PRIVATE:-}"
 ARR_RUN_CONFIGARR="${ARR_RUN_CONFIGARR:-1}"
 
 # Addresses the containers use for each other over nas-net. Not the *_URL vars
@@ -441,15 +448,16 @@ add_application Radarr Radarr "$RADARR_INTERNAL_URL" "$RADARR_API_KEY" \
 # --- indexers ----------------------------------------------------------------
 
 if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
-  say "Adding public indexers to Prowlarr"
+  say "Adding indexers to Prowlarr"
   # Every call below is non-fatal on purpose: `api` returns 22 under `set -e`,
   # and a tracker that is merely down or renamed must not abort the run before
   # Configarr gets its turn. Each step captures its own rc and warns instead.
   add_indexers() {
-    local schema existing def entry rc=0
+    local schema existing def key user pass
 
     if [ "$DRY_RUN" -eq 1 ]; then
       info "[dry-run] GET /api/v1/indexer/schema, then POST each of: ${ARR_INDEXERS}"
+      [ -n "$ARR_INDEXERS_PRIVATE" ] && info "[dry-run] plus, with credentials: ${ARR_INDEXERS_PRIVATE}"
       return 0
     fi
 
@@ -464,22 +472,54 @@ if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
     existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexer \
       | jq -r '.[].definitionName // empty') || existing=""
 
-    # %s\n, not %s: read consumes up to a newline and fails on EOF, so without a
-    # trailing one the last indexer in the list is assigned but never processed.
-    printf '%s\n' "$ARR_INDEXERS" | tr ',' '\n' | while read -r def; do
-      def="$(printf '%s' "$def" | tr -d '[:space:]')"
-      [ -z "$def" ] && continue
+    # add_one <definitionName> [<username> <password>]
+    add_one() {
+      local def="$1" user="${2:-}" pass="${3:-}" entry rc=0
 
       if printf '%s\n' "$existing" | grep -Fxq "$def"; then
         info "${def}: exists, skipping"
-        continue
+        return 0
       fi
 
       entry=$(printf '%s' "$schema" \
         | jq -c --arg d "$def" 'map(select(.definitionName == $d)) | first // empty')
       if [ -z "$entry" ]; then
         warn "${def}: not in Prowlarr's bundled definitions — skipping"
-        continue
+        return 0
+      fi
+
+      if [ -n "$user" ]; then
+        # A definition that authenticates some other way (cookie, passkey, 2FA)
+        # has no username/password fields; injecting into it would drop the
+        # credentials silently and save a dead indexer that looks configured.
+        if ! printf '%s' "$entry" | jq -e \
+            '[.fields[].name] | (index("username") != null and index("password") != null)' >/dev/null; then
+          warn "${def}: definition has no username/password fields — skipping."
+          warn "${def}: its fields are: $(printf '%s' "$entry" | jq -r '[.fields[].name] | join(", ")')"
+          return 0
+        fi
+        # Priority 10 vs the public 25: on otherwise-equal releases the apps
+        # break the tie toward the private copy.
+        entry=$(printf '%s' "$entry" | jq -c --arg u "$user" --arg p "$pass" '
+          .enable = true | .priority = 10
+          | .fields |= map(if   .name == "username" then .value = $u
+                           elif .name == "password" then .value = $p
+                           else . end)')
+
+        # No forceSave on the first try: the create-path test is the only
+        # automatic check these credentials will ever get. Only when it fails
+        # (site down, captcha, wrong password — the error above says which) is
+        # the indexer saved untested, so it can be retested from the UI.
+        rc=0
+        api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/indexer \
+          "$entry" >/dev/null || rc=$?
+        if [ "$rc" -eq 0 ]; then
+          info "${def}: added (credentials verified)"
+          return 0
+        fi
+        warn "${def}: connection test failed (details above) — saving untested"
+      else
+        entry=$(printf '%s' "$entry" | jq -c '.enable = true | .priority = 25')
       fi
 
       # forceSave: CreateProvider tests the indexer before saving and aborts on
@@ -487,12 +527,36 @@ if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
       # leave it unconfigured — it can be tested from the UI later.
       rc=0
       api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST '/api/v1/indexer?forceSave=true' \
-        "$(printf '%s' "$entry" | jq '.enable = true | .priority = 25')" >/dev/null || rc=$?
+        "$entry" >/dev/null || rc=$?
       if [ "$rc" -ne 0 ]; then
         warn "${def}: could not be added (exit ${rc})"
-        continue
+        return 0
       fi
       info "${def}: added"
+      return 0
+    }
+
+    # %s\n, not %s: read consumes up to a newline and fails on EOF, so without a
+    # trailing one the last indexer in the list is assigned but never processed.
+    printf '%s\n' "$ARR_INDEXERS" | tr ',' '\n' | while read -r def; do
+      def="$(printf '%s' "$def" | tr -d '[:space:]')"
+      [ -z "$def" ] && continue
+      add_one "$def"
+    done
+
+    printf '%s\n' "$ARR_INDEXERS_PRIVATE" | tr ',' '\n' | while read -r def; do
+      def="$(printf '%s' "$def" | tr -d '[:space:]')"
+      [ -z "$def" ] && continue
+      # kinozal -> ARR_INDEXER_KINOZAL_USER / _PASS. tr -c leaves only A-Z0-9,
+      # so the eval'd name cannot carry anything but a variable name.
+      key=$(printf '%s' "$def" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
+      user=$(eval "printf '%s' \"\${ARR_INDEXER_${key}_USER:-}\"")
+      pass=$(eval "printf '%s' \"\${ARR_INDEXER_${key}_PASS:-}\"")
+      if [ -z "$user" ] || [ -z "$pass" ]; then
+        warn "${def}: ARR_INDEXER_${key}_USER/_PASS not set in ${ENV_FILE} — skipping"
+        continue
+      fi
+      add_one "$def" "$user" "$pass"
     done
     return 0
   }
@@ -561,7 +625,8 @@ info "Radarr:      ${RADARR_URL}   (root ${RADARR_ROOT_FOLDER})"
 info "Prowlarr:    ${PROWLARR_URL}"
 cat <<'EOF'
 
-    Still manual: add any private indexers in Prowlarr (credentials cannot be
-    generated), and import the existing library — Sonarr -> Series -> Import,
-    Radarr -> Movies -> Import — which reads what is already on the HDD.
+    Still manual: any private indexer not covered by ARR_INDEXERS_PRIVATE
+    (cookie/captcha/2FA logins cannot be scripted), and import the existing
+    library — Sonarr -> Series -> Import, Radarr -> Movies -> Import — which
+    reads what is already on the HDD.
 EOF
