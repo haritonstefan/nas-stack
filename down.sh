@@ -4,8 +4,13 @@
 #
 # DESTRUCTIVE. Everything Jellyfin knows — users, libraries, watch state,
 # metadata — lives in /volume2/docker/jellyfin and does not survive this.
-# Homepage's config goes too, including any tile edits made on the NAS.
+# Homepage's config goes too, including any tile edits made on the NAS. The arr
+# stack's config goes as well: indexers, quality profiles and download history.
 # Media under /volume1 is never touched; nothing outside /volume2/docker is.
+#
+# Downloads are NOT deleted. Config is reproducible from this repo; a part-done
+# or still-seeding torrent is not, so the download tree survives teardown and
+# must be removed by hand if you want it gone.
 #
 #   ./down.sh                 # dry run: shows exactly what would be removed
 #   ./down.sh --yes           # actually do it (prompts once for confirmation)
@@ -29,7 +34,7 @@ for arg in "$@"; do
     --yes|-y)       APPLY=1 ;;
     --force|-f)     FORCE=1 ;;
     --containers)   CONTAINERS_ONLY=1 ;;
-    core|jellyfin)  STACKS="${STACKS} ${arg}" ;;
+    core|jellyfin|arr) STACKS="${STACKS} ${arg}" ;;
     -h|--help)
       # Print the header block: every comment line after the shebang, stopping
       # at the first non-comment. Self-adjusting, so editing the header above
@@ -38,11 +43,11 @@ for arg in "$@"; do
       exit 0 ;;
     *)
       echo "Unknown argument: ${arg}" >&2
-      echo "Usage: ./down.sh [--yes] [--force] [--containers] [core] [jellyfin]" >&2
+      echo "Usage: ./down.sh [--yes] [--force] [--containers] [core] [jellyfin] [arr]" >&2
       exit 1 ;;
   esac
 done
-STACKS="${STACKS:- core jellyfin}"
+STACKS="${STACKS:- core jellyfin arr}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 info() { printf '    %s\n' "$1"; }
@@ -63,6 +68,8 @@ command -v docker >/dev/null 2>&1 || { echo "ERROR: docker is required." >&2; ex
 [ -f core.env ] && { set -a; . ./core.env; set +a; }
 # shellcheck disable=SC1091
 [ -f jellyfin.env ] && { set -a; . ./jellyfin.env; set +a; }
+# shellcheck disable=SC1091
+[ -f arr.env ] && { set -a; . ./arr.env; set +a; }
 
 # --- what would be deleted ---------------------------------------------------
 
@@ -80,6 +87,21 @@ esac
 case " $STACKS " in
   *" jellyfin "*)
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${JELLYFIN_CONFIG_DIR:-${SAFE_ROOT}/jellyfin/config}")"
+    ;;
+esac
+case " $STACKS " in
+  *" arr "*)
+    # One entry per service, since each owns its own /volume2/docker/<service>.
+    # DOWNLOADS_DIR is deliberately absent: it is under SAFE_ROOT and so would be
+    # accepted, but deleting a seeding torrent tree is not a config reset. It is
+    # reported under "NOT touched" instead.
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${SONARR_CONFIG_DIR:-${SAFE_ROOT}/sonarr/config}")"
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${RADARR_CONFIG_DIR:-${SAFE_ROOT}/radarr/config}")"
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${PROWLARR_CONFIG_DIR:-${SAFE_ROOT}/prowlarr/config}")"
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${QBITTORRENT_CONFIG_DIR:-${SAFE_ROOT}/qbittorrent/config}")"
+    # dirname covers both config/ and repos/ under /volume2/docker/configarr.
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${CONFIGARR_CONFIG_DIR:-${SAFE_ROOT}/configarr/config}")"
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${OFELIA_CONFIG_DIR:-${SAFE_ROOT}/ofelia/config}")"
     ;;
 esac
 
@@ -110,7 +132,7 @@ if [ "$APPLY" -eq 0 ]; then
 fi
 
 say "Containers to stop and remove"
-for tier in core jellyfin; do
+for tier in core jellyfin arr; do
   case " $STACKS " in *" $tier "*) ;; *) continue ;; esac
   info "project nas-${tier} (docker-compose.${tier}.yml)"
 done
@@ -134,7 +156,16 @@ else
   fi
   say "NOT touched"
   info "anything outside ${SAFE_ROOT}"
-  info "core.env / jellyfin.env (delete by hand if you want a truly clean slate)"
+  info "core.env / jellyfin.env / arr.env (delete by hand for a truly clean slate)"
+  info "  — but arr.env holds the only copy of the arr API keys; losing it means"
+  info "    the rebuilt stack gets new ones and every integration must be redone"
+  case " $STACKS " in
+    *" arr "*)
+      # Under SAFE_ROOT and therefore deletable, but excluded on purpose: config
+      # comes back from this repo, a part-done download does not.
+      info "${DOWNLOADS_DIR:-${SAFE_ROOT}/downloads} (downloads keep seeding; remove by hand)"
+      ;;
+  esac
 fi
 
 if [ "$APPLY" -eq 0 ]; then
@@ -160,25 +191,31 @@ fi
 
 # --- tear down ---------------------------------------------------------------
 
-# Jellyfin first, core last: core owns nas-net, and any bridged consumer stack
-# added later holds a reference to it. Jellyfin itself is host-networked and on
-# no Docker network, so it is order-independent today.
-for tier in jellyfin core; do
+# arr first, core last: core owns nas-net and arr joins it as external, so arr
+# must release its reference before the network can go. Jellyfin is
+# host-networked and on no Docker network, so it is order-independent.
+for tier in arr jellyfin core; do
   case " $STACKS " in *" $tier "*) ;; *) continue ;; esac
   say "Stopping ${tier} stack"
+  # `down` ignores services behind a compose profile unless that profile is
+  # enabled, so the arr tier names its own or the configarr container survives.
+  TIER_PROFILES=""
+  [ "$tier" = "arr" ] && TIER_PROFILES="--profile configarr"
   if [ -f "${tier}.env" ]; then
+    # shellcheck disable=SC2086
     run docker compose -p "nas-${tier}" --env-file "${tier}.env" \
-      -f "docker-compose.${tier}.yml" down --remove-orphans
+      -f "docker-compose.${tier}.yml" $TIER_PROFILES down --remove-orphans
   else
+    # shellcheck disable=SC2086
     run docker compose -p "nas-${tier}" \
-      -f "docker-compose.${tier}.yml" down --remove-orphans
+      -f "docker-compose.${tier}.yml" $TIER_PROFILES down --remove-orphans
   fi
 done
 
 # A container started outside the -p convention lives under a different project
 # name and is missed by the calls above; clean up by name as a backstop.
 say "Removing any stray containers by name"
-for c in homepage jellyfin; do
+for c in homepage jellyfin sonarr radarr prowlarr qbittorrent flaresolverr configarr ofelia; do
   if docker ps -aq -f "name=^${c}$" | grep -q .; then
     run docker rm -f "$c" >/dev/null
     info "removed ${c}"

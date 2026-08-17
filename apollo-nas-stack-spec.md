@@ -29,6 +29,11 @@ tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 | 8096 | Jellyfin web UI/API |
 | 7359/udp | Jellyfin client auto-discovery |
 | 1900/udp | Jellyfin DLNA / SSDP |
+| 8989 | Sonarr |
+| 7878 | Radarr |
+| 9696 | Prowlarr |
+| 8080 | qBittorrent web UI |
+| 6881 tcp+udp | qBittorrent torrent traffic |
 | 53 | PiHole (planned) |
 
 Publishing ports is the design. Every user-facing service claims a host port and is linked
@@ -77,11 +82,19 @@ as `external: true`.
 - Services users reach directly publish a host port.
 - **Jellyfin is the exception**: `network_mode: host`, so it is on no Docker network.
 
-**Today `nas-net` carries no traffic.** Homepage is its only member, and Jellyfin is
-host-networked, so nothing currently resolves anything by container name — Homepage reads
-Jellyfin's tile over the Docker socket, not the wire. Do not debug a connectivity problem
-on the assumption that the two share a network. It is provisioned ahead of the `arr` stack,
-whose services do talk to each other by name.
+**`nas-net` carries real traffic as of the `arr` stack**, which is what it was provisioned
+for. Prowlarr pushes indexers to `http://sonarr:8989` and `http://radarr:7878`, both reach
+`http://qbittorrent:8080`, and Homepage's widgets poll all four by container name.
+
+**Jellyfin is still not on it.** It stays host-networked, so Homepage reads its tile over the
+Docker socket rather than the wire. A container-name address that works from Sonarr will not
+work from or to Jellyfin — do not debug a connectivity problem on the assumption that
+everything in the stack shares one network.
+
+Note the split this forces in the arr tier's Homepage labels: `homepage.href` is a host
+address (`http://apollo.local:8989`, resolved by the browser), while `homepage.widget.url` is
+a container address (`http://sonarr:8989`, resolved by Homepage). They are not
+interchangeable, and a wrong `href` is a user-visible dead end.
 
 No internal/backend network — nothing runs a database yet. Add one when something needs it.
 
@@ -167,20 +180,51 @@ never as separate partial bodies.
 ```
 /volume2/docker/            # SSD — all container config and logs
 ├── homepage/config/
-└── jellyfin/
-    ├── config/             # SQLite databases
-    └── cache/              # transcode scratch
+├── jellyfin/
+│   ├── config/             # SQLite databases
+│   └── cache/              # transcode scratch
+├── sonarr/config/
+├── radarr/config/
+├── prowlarr/config/
+├── qbittorrent/config/     # qBittorrent.conf, seeded once by up.sh
+├── configarr/
+│   ├── config/             # config.yml, installed by up.sh when absent
+│   └── repos/              # cached TRaSH + Recyclarr template clones
+├── ofelia/config/          # ofelia.ini — the configarr sync schedule
+└── downloads/              # torrents seed from here; NOT deleted by down.sh
+    ├── incomplete/
+    └── complete/
 ```
 
 ```
-/volume1/Media/             # HDD — library root, mounted :ro into Jellyfin
-├── Movies/
-├── Series/
-└── Music/
+/volume1/Media/             # HDD — library root
+├── Movies/                 # :ro into Jellyfin, rw into Radarr
+├── Series/                 # :ro into Jellyfin, rw into Sonarr
+└── Music/                  # :ro into Jellyfin
 ```
 
 Config on the **SSD**; nothing that spins up the HDD at idle belongs there. Media on the
 **HDD**, mounted read-only wherever a service only reads. Note the capitalisation.
+
+### Downloads on the SSD: copies, not hardlinks
+
+The download tree lives on `/volume2` while the library lives on `/volume1`. These are
+different filesystems, so **hardlinks are impossible and every import is a full copy**. That
+is the intended trade:
+
+- Seeding runs entirely off the SSD, so a seeding torrent never holds the media HDD awake —
+  the same rule that keeps config off `/volume1`.
+- Cost: transient 2× space for the file being imported, one cross-filesystem copy per import,
+  and `copyUsingHardlinks` is asserted in Sonarr/Radarr but inert.
+- The SSD would fill without a bound, so qBittorrent deletes torrents *and their content* at
+  ratio 2.0 or 14 days. That cap is the only thing draining the tree; see section 8.
+
+The alternative — download tree under `/volume1` next to `Media/` — buys instant hardlinked
+imports and no duplicate space, at the cost of keeping the HDD awake for as long as anything
+is seeding. Moving `DOWNLOADS_DIR` is the whole change if that trade ever looks better.
+
+Note this is a deliberate departure from the TRaSH guides' single-`/data`-mount
+recommendation, which exists precisely to make hardlinks work.
 
 Compose files must not hardcode these paths — they come from `<tier>.env` (gitignored,
 with `<tier>.env.example` as the template).
@@ -286,13 +330,65 @@ Homepage is the only externally-reachable service in `core`: pin it, update deli
 
 No routing config, no name registration — publish the port, add the labels.
 
-For the arr stack specifically:
+### The arr stack as built
 
-- They need **write** access to the media paths, so Jellyfin's read-only mount is not
-  enough — mount read-write for them, or split into separate download/library trees.
-- Use **identical mount paths** across all containers (e.g. `/media` everywhere) so
-  hardlinks and atomic moves work instead of slow cross-filesystem copies.
-- They are bridge services on `nas-net`: only Jellyfin needs host networking.
+Sonarr, Radarr, Prowlarr and qBittorrent, plus Flaresolverr (no published port, so no tile),
+Configarr (no port, run-to-completion) and Ofelia (the scheduler that starts it). All bridge
+services on `nas-net`; only Jellyfin needs host networking.
+
+- Media is mounted **read-write** here, unlike Jellyfin's `:ro`. Sonarr and Radarr each see
+  only the tree they manage (`/media/series`, `/media/movies`), and their root folders are the
+  existing `/volume1/Media/{Series,Movies}` — no migration, and Jellyfin's mounts are unchanged.
+- **The download path must be the identical container path in qBittorrent, Sonarr and Radarr**
+  (`/downloads`). qBittorrent reports absolute paths, so a mismatch produces a remote-path-
+  mapping failure on every import. This is required regardless of the hardlink question.
+- Identical mount paths do **not** buy hardlinks here, because the download tree is on a
+  different filesystem from the library by design — see section 6.
+- **Identity is set via `PUID`/`PGID` environment, not compose `user:`.** LinuxServer.io images
+  usermod internally in their entrypoint. Section 7's objection to image-level `PUID`/`PGID` is
+  scoped to Homepage, where the identity must be inspectable from outside because it gates
+  socket access; none of these containers touch the socket. `UMASK=002` keeps what they write
+  group-readable for Jellyfin, which runs as the same `1000:10`.
+
+### Secrets in this tier
+
+Each app's API key is injected as `<APP>__AUTH__APIKEY`, read at every start **in place of**
+`config.xml`, so the key is never persisted by the app. `up.sh` generates the three keys and
+the qBittorrent password into `arr.env` on first run and never regenerates them.
+
+`arr.env` therefore holds the only copy. Losing it does not error — each app quietly mints and
+persists a *new* key, and Prowlarr's sync, Configarr and all three Homepage widgets break at
+once. `down.sh` preserves `.env` files for this reason.
+
+The keys also appear in `homepage.widget.key` labels, and labels are readable by anything that
+can read the Docker socket or run `docker inspect`. Accepted on the same basis as the socket
+mount itself: LAN-only, single-user, no forwarded ports. It needs revisiting alongside that
+decision if the box ever becomes externally reachable.
+
+### qBittorrent first-boot config
+
+qBittorrent generates a **new random WebUI password on every start unless one is already
+stored** — the sole trigger is an empty stored password, and the temporary one is per-session
+and never persisted. Without pre-seeding, every container restart would invalidate the
+credentials Sonarr and Radarr hold. So `up.sh` writes `qBittorrent.conf` before first start
+with a PBKDF2 hash (SHA-512, 100000 iterations, 16-byte salt, 64-byte key,
+`base64(salt):base64(key)` wrapped in `@ByteArray(...)`).
+
+qBittorrent **rewrites that file on clean shutdown**, so it is a first-boot seed, not ongoing
+config management — it is installed only when absent, and edits made on the NAS survive.
+
+The seed cap lives there too, and two details are easy to get wrong:
+
+- The key is `Session\ShareLimitAction`. `MaxRatioAction` is obsolete.
+- The value is the enum's **string name**, not its integer — enums serialise via
+  `Utils::String::fromEnum`, so a numeric value fails to parse and silently falls back to the
+  default `Stop`, which only pauses and lets the SSD fill. The enum is non-sequential
+  (`Stop = 0`, `Remove = 1`, `EnableSuperSeeding = 2`, `RemoveWithContent = 3`), so guessing
+  the number is doubly unsafe. `RemoveWithContent` is the only value that frees space.
+
+Correspondingly, **`removeCompletedDownloads` is `false`** on the Sonarr/Radarr download
+clients: when true the arr app deletes the torrent right after import, so the ratio and time
+limits are never reached. Removal is qBittorrent's job in this design, not the arr's.
 
 ---
 
@@ -309,9 +405,9 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 ## 10. Running
 
 `sudo ./up.sh` takes a fresh clone to running: env files from the examples, host
-directories with correct ownership, `core` then `jellyfin`, then Jellyfin's API bootstrap.
-Idempotent — existing `.env` files are never overwritten and configured steps are skipped.
-`./down.sh` reverses it and is a **dry run by default**.
+directories with correct ownership, generated arr secrets, `core` then `jellyfin` then `arr`,
+then each stack's API bootstrap. Idempotent — existing `.env` files are never overwritten and
+configured steps are skipped. `./down.sh` reverses it and is a **dry run by default**.
 
 Underneath it is plain compose. Compose does not read `<tier>.env` on its own and all tiers
 share one directory, so `--env-file` and `-p nas-<tier>` are required on every call:
@@ -319,11 +415,18 @@ share one directory, so `--env-file` and `-p nas-<tier>` are required on every c
 ```
 docker compose -p nas-core --env-file core.env -f docker-compose.core.yml up -d
 docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
+docker compose -p nas-arr --env-file arr.env -f docker-compose.arr.yml up -d
 ```
+
+Bring-up order is `core` first (it defines `nas-net`); teardown is the reverse, `arr` first,
+since `arr` joins that network as `external` and holds a reference to it.
 
 `down.sh` invariant: **nothing outside `/volume2/docker` can be deleted.** Delete targets
 come from a sourced `.env` and every path is validated against that root — rejected if it
-escapes, contains `..`, or is the root itself. `.env` files survive teardown.
+escapes, contains `..`, or is the root itself. `.env` files survive teardown, which for `arr`
+also means the API keys survive. The download tree is exempted by name rather than by the
+root check: it *is* inside `/volume2/docker` and would pass validation, but a still-seeding
+torrent is not a config artifact and is not reproducible from this repo.
 
 ---
 
@@ -338,6 +441,16 @@ escapes, contains `..`, or is the root itself. `.env` files survive teardown.
 | HTTP only | `.local` cannot receive a public certificate (RFC 6762) | No transport encryption on the LAN |
 | `apollo.local` only | No per-name systemd units to maintain across OS updates | Service URLs carry port numbers |
 | Exact image pins | Reproducible; the daemon API is old enough that floating tags break | Manual update step |
+| Downloads on the SSD | Seeding never holds the media HDD awake | No hardlinks — every import is a full copy, transient 2× space |
+| Seeding capped at ratio 2 / 14 days | The only thing draining the SSD download tree | Torrents stop seeding on a fixed schedule, not by choice |
+| arr root folders on the existing `Media/` dirs | No migration of a live library; Jellyfin unchanged | Keeps the capitalised, non-TRaSH layout |
+| `PUID`/`PGID` as env for arr | What LinuxServer.io images support; no socket access to gate | Inconsistent with Homepage/Jellyfin's `user:` |
+| API keys generated into `arr.env` | Breaks the key-distribution cycle; bring-up is one pass | `arr.env` is the only copy and is load-bearing forever |
+| Keys in `homepage.widget.*` labels | Widgets need them; tile config stays with the service | Readable via `docker inspect` |
+| No VPN for torrent traffic | Nothing to configure or keep alive | Torrent traffic uses the LAN's own egress |
+| Configarr over Recyclarr | Reads `!env` natively, so the bootstrap needs no fragile generate-then-rewrite credential patching; actively tracks upstream template churn | Younger project; no built-in scheduler, so one is bolted on |
+| Ofelia as that scheduler | Keeps the daily cadence inside compose — no host cron for `down.sh` to clean up | A **second** container with root-equivalent socket access |
+| `down.sh` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
 
 ### The standing assumption
 

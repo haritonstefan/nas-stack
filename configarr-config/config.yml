@@ -1,0 +1,74 @@
+# Configarr — TRaSH quality profiles and custom formats for Sonarr and Radarr.
+#
+# up.sh installs this into CONFIGARR_CONFIG_DIR only when absent, so on-NAS
+# edits survive. There are no placeholder tokens to substitute: the API keys
+# arrive as environment variables from arr.env via the compose file, and !env
+# resolves them at run time. An unset variable is a hard error, not an empty
+# string.
+
+trashGuideUrl: https://github.com/TRaSH-Guides/Guides
+recyclarrConfigUrl: https://github.com/recyclarr/config-templates
+
+# Recyclarr v8 deleted the includes/ tree from the config-templates repo, so
+# every `- template:` below only resolves at this commit. Configarr already
+# defaults to exactly this SHA (DEFAULT_RECYCLARR_REVISION); it is spelled out
+# so a future change to that default cannot move the templates underneath us.
+recyclarrRevision: 4ae377bb704fc7fd69a544ad04e91357e0b09f62
+
+# Template names are include *file basenames*, not the Recyclarr CLI template
+# ids (`web-1080p`, `hd-bluray-web`) that `recyclarr config create` takes.
+# The two namespaces differ, and a name that does not
+# resolve is not an error — it is a silently missing profile. Sonarr and Radarr
+# do not share a naming scheme: there is no radarr-quality-profile-web-1080p,
+# and hd-bluray-web is the Radarr analogue of Sonarr's web-1080p. List the
+# available names with:
+#   git ls-tree -r --name-only <revision> sonarr/includes/ radarr/includes/
+
+sonarr:
+  series:
+    # Container address on nas-net, deliberately not !env SONARR_URL: that
+    # variable is the *host* address (127.0.0.1:8989) the bootstrap's own curl
+    # calls use, and resolving it in here would point configarr at itself.
+    base_url: http://sonarr:8989
+    api_key: !env SONARR_API_KEY
+
+    quality_definition:
+      type: series
+
+    include:
+      - template: sonarr-quality-definition-series
+      - template: sonarr-v4-quality-profile-web-1080p
+      - template: sonarr-v4-custom-formats-web-1080p
+
+radarr:
+  movies:
+    base_url: http://radarr:7878
+    api_key: !env RADARR_API_KEY
+
+    quality_definition:
+      type: movie
+
+    include:
+      - template: radarr-quality-definition-movie
+      - template: radarr-quality-profile-hd-bluray-web
+      - template: radarr-custom-formats-hd-bluray-web
+
+# Intentionally absent, and not oversights:
+#
+#   root_folders          - configarr deletes and recreates them to match this
+#                           file; arr-bootstrap.sh adds them additively instead.
+#   download_clients      - would manage removeCompletedDownloads (must stay
+#                           false or the seed cap never fires and the SSD fills)
+#                           and the qBittorrent password, which up.sh seeds as a
+#                           PBKDF2 hash on first boot.
+#   delay_profiles        - deletes any profile not listed here.
+#   media_naming          - would rename the existing library, which keeps its
+#                           capitalised, non-TRaSH layout on purpose.
+#   delete_unmanaged_*    - destructive on a box with real data.
+#
+# Absence here is not airtight: an included template can carry root_folders,
+# delay_profiles, media_naming or media_management sections, and configarr
+# merges them into the instance config as if they were written above. The six
+# templates listed each contain exactly one top-level key (quality_definition /
+# quality_profiles / custom_formats) and the revision pin freezes them — but
+# read any FUTURE include for those keys before adding it.
