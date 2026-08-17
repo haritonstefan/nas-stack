@@ -5,13 +5,14 @@ services:
     restart: unless-stopped
     environment:
       HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS:-apollo.local}
-      PUID: ${PUID:-1000}
-      PGID: ${PGID:-10}
       TZ: ${TZ:-Europe/Bucharest}
-    # Homepage runs as PUID:PGID (1000:10), which cannot connect to the
-    # root:docker 0660 socket. Reading labels needs the host docker group.
-    group_add:
-      - "${DOCKER_GID:-121}"
+    # Identity is set here rather than via the image's PUID/PGID, so it is
+    # visible to `docker inspect` instead of decided inside the entrypoint.
+    # The primary GID is the host `docker` group, which owns the 0660 socket
+    # Homepage reads container labels from — a primary GID cannot be dropped
+    # during privilege transition, and it needs no DAC_OVERRIDE to open the
+    # socket. /app/config is owned by PUID, so it stays writable.
+    user: "${PUID:-1000}:${DOCKER_GID:-121}"
     ports:
       - "${HOMEPAGE_HTTP_PORT:-80}:3000"
     volumes:
