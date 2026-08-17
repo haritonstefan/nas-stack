@@ -6,12 +6,9 @@ services:
     environment:
       HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS:-apollo.local}
       TZ: ${TZ:-Europe/Bucharest}
-    # Identity is set here rather than via the image's PUID/PGID, so it is
-    # visible to `docker inspect` instead of decided inside the entrypoint.
-    # The primary GID is the host `docker` group, which owns the 0660 socket
-    # Homepage reads container labels from — a primary GID cannot be dropped
-    # during privilege transition, and it needs no DAC_OVERRIDE to open the
-    # socket. /app/config is owned by PUID, so it stays writable.
+    # Not the image's PUID/PGID: identity must be inspectable, and the primary
+    # GID must be the host docker group that owns the 0660 socket label
+    # discovery reads. A primary GID survives any privilege drop.
     user: "${PUID:-1000}:${DOCKER_GID:-121}"
     ports:
       - "${HOMEPAGE_HTTP_PORT:-80}:3000"

@@ -1,0 +1,6 @@
+# Intentionally empty. Homepage writes its own sample bookmarks (Developer,
+# Social, Entertainment) when this file is absent; installing an empty one
+# suppresses them. Add groups here to put bookmark tiles on the dashboard.
+#
+# Copied to the Homepage config dir by up.sh only if not already present, so
+# local edits survive. Edit it there, not here, once running.

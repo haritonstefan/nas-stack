@@ -150,9 +150,11 @@ if want core; then
   # status only resolve once it declares the socket.
   # services.yaml: seeds tiles for things that are not containers here (UGOS)
   # and so cannot be auto-discovered.
-  # Both are copied only when absent, so edits made on the NAS survive re-runs.
+  # bookmarks.yaml: empty on purpose — Homepage writes sample Developer/Social/
+  # Entertainment bookmarks when the file is missing.
+  # All are copied only when absent, so edits made on the NAS survive re-runs.
   HP_CONFIG="${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}"
-  for hp_file in docker.yaml services.yaml; do
+  for hp_file in docker.yaml services.yaml bookmarks.yaml; do
     if [ -f "${HP_CONFIG}/${hp_file}" ]; then
       info "${hp_file} exists, leaving untouched"
     else

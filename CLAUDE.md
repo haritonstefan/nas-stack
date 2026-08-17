@@ -18,7 +18,7 @@ Bring-up order: `core` first, then consumer stacks in any order.
 - `up.sh` / `down.sh` / `jellyfin-bootstrap.sh` — the automation. All have `--help`.
 - `apollo-nas-stack-spec.md` — target state and the **reasoning** behind each constraint.
   Read it before proposing an architectural change.
-- `homepage-config/` — templates (`docker.yaml`, `services.yaml`) that `up.sh` installs
+- `homepage-config/` — templates (`docker.yaml`, `services.yaml`, `bookmarks.yaml`) that `up.sh` installs
   into the Homepage config dir only when absent, so on-NAS edits survive.
 - `reference/` — the vendored Jellyfin OpenAPI spec (query it with `jq`, never `Read` it)
   plus recipes in `reference/README.md`.
@@ -86,6 +86,8 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
 - `nas-net` is defined by `core` (not `external:` there); consumer stacks join it as `external: true`. Bridge by default — `network_mode: host` only for a service that strictly needs broadcast/multicast on the LAN (Jellyfin is the one exception).
 - **`nas-net` carries no traffic today** — Homepage is its only member and Jellyfin is host-networked, so nothing resolves anything by container name yet. It exists for the `arr` stack, whose services talk to each other by name. Don't assume Homepage and Jellyfin share a network when debugging.
 - Homepage's Docker integration needs both the socket mount *and* `docker.yaml` in its config dir (template: `homepage-config/docker.yaml`). Labels are read over the **Docker socket API, not the network**, so host-networked and off-`nas-net` containers still auto-discover.
+- **Socket access is a DAC problem, and `EACCES` is not a path problem.** `/var/run/docker.sock` is `root:docker` `0660` (`DOCKER_GID=121`). Homepage sets identity via `user: "${PUID}:${DOCKER_GID}"` — *not* the image's `PUID`/`PGID`, which decide it inside the entrypoint where `docker inspect` can't see the result, and *not* `group_add`, whose supplementary GID a privilege drop can discard. A primary GID survives, and matching the socket's group needs no `DAC_OVERRIDE`. `/app/config` is owned by `PUID`, so it stays writable. When discovery fails, no container is listed at all and Homepage renders only `services.yaml` — it looks like one service being ignored, not a dead integration. Diagnose by mechanism, in order: `ENOENT` means the path is wrong, `EACCES` means it was found and refused — so check `docker inspect` for `CapDrop`/`SecurityOpt`, `/proc/1/status` for `CapEff` and PID 1's real `Groups` (a `docker exec` session gets fresh credentials and can differ from the server process), and `dmesg | grep denied` for AppArmor. `:ro` on the socket restricts nothing about the API.
+- Granting a container the docker group is **root-equivalent host access**. Accepted here for Homepage on a LAN-only box with no forwarded ports; a read-only socket proxy is the alternative if that changes.
 - `homepage.href` values are real addresses (`http://apollo.local:8096`), and tiles are the only way in — a wrong href is a user-visible dead end.
 - `HOMEPAGE_ALLOWED_HOSTS` must list **every** name/address Homepage is reached *at* — the NAS's own name and IP, not the clients'. An unlisted Host header gets a 400. **No wildcard or CIDR support**: `192.168.0.*` is matched literally and rejects everything, so each address is listed in full (`*` alone disables the check entirely).
 - Anything not a container (UGOS on 9999) can't be auto-discovered — hand-add it in `services.yaml`.
