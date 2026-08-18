@@ -22,6 +22,8 @@ Idempotent — existing .env files are never overwritten, already-running stacks
 are reconciled rather than recreated, and the bootstraps skip what is already
 configured.
 
+Optional: run ./configure.sh first for a guided setup of the .env files.
+
   sudo ./up.sh                  # everything
   ./up.sh --dry-run             # print what would happen, change nothing
   sudo ./up.sh core             # only the core stack
@@ -112,7 +114,7 @@ for tier in core jellyfin arr; do
   else
     run cp "${tier}.env.example" "${tier}.env"
     repo_own "${tier}.env"
-    info "${tier}.env created from example — review before relying on it"
+    info "${tier}.env created from example — run ./configure.sh to customize, or edit by hand"
   fi
 done
 
@@ -310,7 +312,8 @@ if [ "$NEED_PASSWORD_PROMPT" -eq 1 ]; then
     info "saved to jellyfin.env (chmod 600)"
   else
     echo "ERROR: JELLYFIN_ADMIN_PASSWORD is unset and there is no TTY to" >&2
-    echo "       prompt on. Set it in jellyfin.env and re-run." >&2
+    echo "       prompt on. Set it in jellyfin.env (or run ./configure.sh on" >&2
+    echo "       a terminal first) and re-run." >&2
     exit 1
   fi
 fi

@@ -16,8 +16,12 @@ Bring-up order: `core` first, then consumer stacks in any order.
 ### Files
 
 - `docker-compose.<tier>.yml` + `<tier>.env.example` — one self-contained pair per tier.
-- `up.sh` / `down.sh` / `arr-bootstrap.sh` — the automation, all with `--help`.
+- `up.sh` / `down.sh` / `arr-bootstrap.sh` / `configure.sh` — the automation, all with `--help`.
   `jellyfin-bootstrap.sh` has no `--help`; don't repeat that gap in new scripts.
+- `configure.sh` — optional interactive wizard that fills in the `.env` files before
+  `up.sh` (detects host facts, asks shared values once, stages + confirms per file).
+  It never touches the up.sh-generated secrets, and `up.sh` stays fully non-interactive
+  without it.
 - `apollo-nas-stack-spec.md` — target state and the **reasoning** behind each constraint.
   Read it before proposing an architectural change.
 - `homepage-config/` — templates (`docker.yaml`, `services.yaml`, `bookmarks.yaml`) that `up.sh` installs

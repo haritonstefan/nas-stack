@@ -433,6 +433,8 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 directories with correct ownership, generated arr secrets, `core` then `jellyfin` then `arr`,
 then each stack's API bootstrap. Idempotent — existing `.env` files are never overwritten and
 configured steps are skipped. `./down.sh` reverses it and is a **dry run by default**.
+`./configure.sh` is the optional interactive front-end: it detects host facts and fills in
+the `.env` files (never the generated secrets), so `up.sh` itself stays non-interactive.
 
 Underneath it is plain compose. Compose does not read `<tier>.env` on its own and all tiers
 share one directory, so `--env-file` and `-p nas-<tier>` are required on every call:
