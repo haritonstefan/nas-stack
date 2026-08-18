@@ -72,7 +72,7 @@ run() {
 
 say "Checking prerequisites"
 MISSING=""
-for cmd in docker curl jq; do
+for cmd in docker curl jq openssl; do
   command -v "$cmd" >/dev/null 2>&1 || MISSING="${MISSING} ${cmd}"
 done
 if [ -n "$MISSING" ]; then
@@ -81,7 +81,7 @@ if [ -n "$MISSING" ]; then
 fi
 docker compose version >/dev/null 2>&1 || {
   echo "ERROR: 'docker compose' (v2) is required." >&2; exit 1; }
-info "docker, docker compose, curl, jq present"
+info "docker, docker compose, curl, jq, openssl present"
 
 if ! docker info >/dev/null 2>&1; then
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -345,6 +345,26 @@ if want arr && [ -f arr.env ]; then
   # No shell metacharacters, so it survives the .conf and the compose label too.
   gen_password() { od -vAn -N18 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-24; }
 
+  # PBKDF2 in qBittorrent's stored format: SHA-512, 100000 iterations, 16-byte
+  # salt, 64-byte key, base64(salt):base64(key). `openssl kdf` needs
+  # OpenSSL >= 3.0 (the NAS ships 3.0.20; openssl is checked in the preflight).
+  # hexpass/hexsalt sidestep kdfopt value parsing, and the password appearing
+  # on openssl's argv for this one call is the same exposure already accepted
+  # by keeping it in plain text in arr.env.
+  gen_qbt_hash() {
+    local pw="$1" pw_hex salt_b64 salt_hex key_b64
+    salt_b64=$(openssl rand -base64 16 2>/dev/null) || salt_b64=""
+    salt_hex=$(printf '%s' "$salt_b64" | openssl base64 -d -A 2>/dev/null \
+      | od -vAn -tx1 | tr -d ' \n') || salt_hex=""
+    pw_hex=$(printf '%s' "$pw" | od -vAn -tx1 | tr -d ' \n')
+    key_b64=$(openssl kdf -binary -keylen 64 \
+        -kdfopt digest:SHA512 -kdfopt "hexpass:${pw_hex}" \
+        -kdfopt "hexsalt:${salt_hex}" -kdfopt iter:100000 PBKDF2 \
+        2>/dev/null | openssl base64 -A) || key_b64=""
+    [ -n "$salt_b64" ] && [ -n "$key_b64" ] || return 1
+    printf '%s:%s\n' "$salt_b64" "$key_b64"
+  }
+
   ARR_SECRETS_WRITTEN=0
   for secret in SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY SEERR_API_KEY; do
     eval "current=\${${secret}:-}"
@@ -392,20 +412,10 @@ if want arr && [ -f arr.env ]; then
   elif [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] would install qBittorrent.conf with a PBKDF2 password hash"
   else
-    # SHA-512, 100000 iterations, 16-byte salt, 64-byte key, base64(salt):base64(key).
-    QBT_HASH=""
-    if command -v python3 >/dev/null 2>&1; then
-      QBT_HASH=$(QBT_PW="$QBITTORRENT_PASSWORD" python3 -c '
-import base64, hashlib, os
-pw = os.environ["QBT_PW"].encode()
-salt = os.urandom(16)
-key = hashlib.pbkdf2_hmac("sha512", pw, salt, 100000, dklen=64)
-print(base64.b64encode(salt).decode() + ":" + base64.b64encode(key).decode())
-') || QBT_HASH=""
-    fi
+    QBT_HASH="$(gen_qbt_hash "$QBITTORRENT_PASSWORD")" || QBT_HASH=""
     if [ -z "$QBT_HASH" ]; then
       echo "ERROR: could not generate the qBittorrent password hash." >&2
-      echo "       python3 is required for this step (checked: python3)." >&2
+      echo "       'openssl kdf' failed — OpenSSL >= 3.0 is required (openssl version)." >&2
       exit 1
     fi
 
