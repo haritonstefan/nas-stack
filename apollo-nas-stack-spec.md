@@ -264,13 +264,28 @@ dashboard is a derived artifact of the stack definition — adding a service add
 with no dashboard config to maintain. Labels alone suffice; `server` and `container` are
 inferred.
 
-Three config files, installed by `up.sh` only when absent so on-NAS edits survive:
+Five config files, installed by `up.sh` only when absent so on-NAS edits survive:
 
 - `docker.yaml` — declares the socket, enabling container status and stats.
 - `services.yaml` — for things that are **not containers on this host** and so cannot be
   auto-discovered (UGOS at `apollo.local:9999`). Containers must not be listed here.
+  Also carries the `Upcoming` calendar tile: its `integrations` reference the
+  docker-discovered Sonarr/Radarr widgets by `service_group`/`service_name`, so it
+  needs no URL or API key of its own.
 - `bookmarks.yaml` — intentionally empty. Homepage writes its own sample Developer/Social/
   Entertainment bookmarks when the file is absent; installing an empty one suppresses them.
+- `settings.yaml` — title, theme, `statusStyle: dot`, quicklaunch, and the group layout.
+  Layout keys must match group names exactly as the `homepage.group=` labels spell them
+  (`Core`, `Media`) and `services.yaml` (`NAS`) — a mismatch silently renders an empty
+  duplicate group.
+- `widgets.yaml` — the header info row: search, resources (CPU/RAM/uptime and disk
+  gauges), open-meteo weather, clock. The disk paths are **container** paths, which is
+  why the compose file bind-mounts `/volume1` and `/volume2` `:ro` into Homepage —
+  read-only visibility adds nothing on top of the docker socket it already holds.
+
+Tiles also carry `homepage.siteMonitor` labels (HTTP up/down + response time). The probe
+runs from the Homepage container, so the URL follows the `widget.url` resolution rule:
+container names over `nas-net`, the LAN IP for host-networked Jellyfin and for UGOS.
 
 `HOMEPAGE_ALLOWED_HOSTS` must list **every** name and address Homepage is reached at — the
 mDNS name, the LAN IP, any tailnet name. These are the NAS's own addresses, not the

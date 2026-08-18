@@ -11,3 +11,25 @@
         icon: ugreen.png
         href: http://apollo.local:9999
         description: NAS administration
+        # Fetched by the Homepage container — apollo.local does not resolve there.
+        siteMonitor: http://192.168.0.231:9999
+
+# The Upcoming tile is not a container either — it aggregates the release
+# calendars of the Sonarr and Radarr widgets that already exist via docker
+# labels. integrations reference them by group+name; no url or key here.
+- Media:
+    - Upcoming:
+        icon: mdi-calendar-month
+        description: Release calendar
+        widget:
+          type: calendar
+          view: agenda
+          maxEvents: 12
+          showTime: true
+          integrations:
+            - type: sonarr
+              service_group: Media
+              service_name: Sonarr
+            - type: radarr
+              service_group: Media
+              service_name: Radarr

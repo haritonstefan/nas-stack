@@ -37,6 +37,7 @@ services:
       # jellyfin-bootstrap.sh (not up.sh), so they are legitimately empty on
       # the first bring-up — up.sh recreates this container once the bootstrap
       # has written them, because labels are baked in at container create.
+      - homepage.siteMonitor=http://${JELLYFIN_LAN_HOST:-192.168.0.231}:8096
       - homepage.widgets[0].type=jellyfin
       - homepage.widgets[0].url=http://${JELLYFIN_LAN_HOST:-192.168.0.231}:8096
       - homepage.widgets[0].key=${JELLYFIN_API_KEY:-}

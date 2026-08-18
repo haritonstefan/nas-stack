@@ -1,0 +1,32 @@
+# Dashboard-wide settings. Installed by up.sh only when absent, so on-NAS edits
+# survive — edit it there, not here, once running.
+#
+# Layout keys must match group names EXACTLY as the homepage.group= labels
+# spell them (Core, Media) and services.yaml (NAS) — a mismatched key silently
+# creates an empty duplicate group.
+
+title: apollo
+
+theme: dark
+color: slate
+
+# dot = colored status dot per tile (docker state + siteMonitor)
+statusStyle: dot
+hideVersion: true
+
+# Lowercase "quicklaunch" — "quickLaunch" is silently ignored.
+quicklaunch:
+  searchDescriptions: true
+  hideInternetSearch: true
+  hideVisitURL: true
+
+layout:
+  Core:
+    style: row
+    columns: 2
+  Media:
+    style: row
+    columns: 3
+  NAS:
+    style: row
+    columns: 2

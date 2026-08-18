@@ -165,9 +165,12 @@ if want core; then
   # and so cannot be auto-discovered.
   # bookmarks.yaml: empty on purpose — Homepage writes sample Developer/Social/
   # Entertainment bookmarks when the file is missing.
+  # settings.yaml: title, theme, group layout/order, statusStyle, quicklaunch.
+  # widgets.yaml: header row — search, resources (disk paths are the container-
+  # side /volume1 + /volume2 :ro mounts), open-meteo weather, clock.
   # All are copied only when absent, so edits made on the NAS survive re-runs.
   HP_CONFIG="${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}"
-  for hp_file in docker.yaml services.yaml bookmarks.yaml; do
+  for hp_file in docker.yaml services.yaml bookmarks.yaml settings.yaml widgets.yaml; do
     if [ -f "${HP_CONFIG}/${hp_file}" ]; then
       info "${hp_file} exists, leaving untouched"
     else

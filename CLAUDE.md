@@ -29,8 +29,10 @@ Bring-up order: `core` first, then consumer stacks in any order.
   without it.
 - `apollo-nas-stack-spec.md` — target state and the **reasoning** behind each constraint.
   Read it before proposing an architectural change.
-- `homepage-config/` — templates (`docker.yaml`, `services.yaml`, `bookmarks.yaml`) that `up.sh` installs
-  into the Homepage config dir only when absent, so on-NAS edits survive.
+- `homepage-config/` — templates (`docker.yaml`, `services.yaml`, `bookmarks.yaml`,
+  `settings.yaml`, `widgets.yaml`) that `up.sh` installs into the Homepage config dir only
+  when absent, so on-NAS edits survive. The install loop in `up.sh` hardcodes the filename
+  list — a new template must be added there too or it silently never reaches the NAS.
 - `qbittorrent-config/qBittorrent.conf` — same install-only-when-absent idiom. `up.sh`
   substitutes the `__PLACEHOLDER__` tokens (password hash, paths, seed cap) at install time.
 - `reference/` — the vendored API specs: Jellyfin's (JSON — query it with `jq`, never `Read`

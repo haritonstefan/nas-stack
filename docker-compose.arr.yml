@@ -38,6 +38,9 @@ services:
       - homepage.icon=sonarr.png
       - homepage.href=http://apollo.local:${SONARR_PORT:-8989}
       - homepage.description=TV series
+      # siteMonitor is probed by the Homepage container itself, so container
+      # names over nas-net — same resolution rule as widget.url below.
+      - homepage.siteMonitor=http://sonarr:8989
       - homepage.widget.type=sonarr
       # href is resolved by the browser, widget.url by the Homepage container.
       - homepage.widget.url=http://sonarr:8989
@@ -76,6 +79,7 @@ services:
       - homepage.icon=radarr.png
       - homepage.href=http://apollo.local:${RADARR_PORT:-7878}
       - homepage.description=Movies
+      - homepage.siteMonitor=http://radarr:7878
       - homepage.widget.type=radarr
       - homepage.widget.url=http://radarr:7878
       - homepage.widget.key=${RADARR_API_KEY:?RADARR_API_KEY is unset — run up.sh to generate it}
@@ -111,6 +115,7 @@ services:
       - homepage.icon=prowlarr.png
       - homepage.href=http://apollo.local:${PROWLARR_PORT:-9696}
       - homepage.description=Indexer manager
+      - homepage.siteMonitor=http://prowlarr:9696
       - homepage.widget.type=prowlarr
       - homepage.widget.url=http://prowlarr:9696
       - homepage.widget.key=${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run up.sh to generate it}
@@ -146,6 +151,7 @@ services:
       - homepage.icon=qbittorrent.png
       - homepage.href=http://apollo.local:${QBITTORRENT_PORT:-8080}
       - homepage.description=Torrent client
+      - homepage.siteMonitor=http://qbittorrent:${QBITTORRENT_PORT:-8080}
       - homepage.widget.type=qbittorrent
       - homepage.widget.url=http://qbittorrent:${QBITTORRENT_PORT:-8080}
       - homepage.widget.username=${QBITTORRENT_USER:-admin}
@@ -187,6 +193,7 @@ services:
       - homepage.icon=seerr.png
       - homepage.href=http://apollo.local:${SEERR_PORT:-5055}
       - homepage.description=Media requests
+      - homepage.siteMonitor=http://seerr:5055
       - homepage.widget.type=seerr
       - homepage.widget.url=http://seerr:5055
       - homepage.widget.key=${SEERR_API_KEY:?SEERR_API_KEY is unset — run up.sh to generate it}

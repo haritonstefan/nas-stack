@@ -14,6 +14,10 @@ services:
     volumes:
       - ${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}:/app/config
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Read-only, solely so the resources widget's df on /volume1 + /volume2
+      # resolves — widget disk paths are container paths (widgets.yaml).
+      - ${HOMEPAGE_HDD_MOUNT:-/volume1}:/volume1:ro
+      - ${HOMEPAGE_SSD_MOUNT:-/volume2}:/volume2:ro
     networks:
       - nas-net
     logging:
