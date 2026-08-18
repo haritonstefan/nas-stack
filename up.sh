@@ -12,8 +12,8 @@ Brings the whole NAS stack up from a fresh clone:
 Creates .env files from the examples, creates host directories with the right
 ownership, starts core (Homepage on :80, which creates nas-net), starts
 Jellyfin (host networking), then configures it over its API via
-jellyfin-bootstrap.sh. Starts the arr stack (Sonarr/Radarr/Prowlarr/qBittorrent)
-and configures it via arr-bootstrap.sh.
+jellyfin-bootstrap.sh. Starts the arr stack (Sonarr/Radarr/Prowlarr/
+qBittorrent/Seerr) and configures it via arr-bootstrap.sh.
 
 Generates the arr API keys and the qBittorrent password into arr.env on first
 run, and never regenerates them.
@@ -212,6 +212,9 @@ if want arr; then
   make_dir "${RADARR_CONFIG_DIR:-/volume2/docker/radarr/config}"
   make_dir "${PROWLARR_CONFIG_DIR:-/volume2/docker/prowlarr/config}"
   make_dir "${QBITTORRENT_CONFIG_DIR:-/volume2/docker/qbittorrent/config}"
+  # Seerr runs as `user: PUID:PGID` (not an LSIO image), so the chown here is
+  # what makes /app/config writable for it.
+  make_dir "${SEERR_CONFIG_DIR:-/volume2/docker/seerr/config}"
   make_dir "${CONFIGARR_CONFIG_DIR:-/volume2/docker/configarr/config}"
   # Cached clones of the TRaSH and Recyclarr template repos, a few hundred MB.
   make_dir "${CONFIGARR_REPOS_DIR:-/volume2/docker/configarr/repos}"
@@ -340,7 +343,7 @@ if want arr && [ -f arr.env ]; then
   gen_password() { od -vAn -N18 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-24; }
 
   ARR_SECRETS_WRITTEN=0
-  for secret in SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY; do
+  for secret in SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY SEERR_API_KEY; do
     eval "current=\${${secret}:-}"
     if [ -n "$current" ]; then
       info "${secret} already set, keeping it"
@@ -555,4 +558,5 @@ if want arr; then
   info "Prowlarr:          http://apollo.local:${PROWLARR_PORT:-9696}"
   info "qBittorrent:       http://apollo.local:${QBITTORRENT_PORT:-8080}"
   info "qBittorrent login: ${QBITTORRENT_USER:-admin} / see QBITTORRENT_PASSWORD in arr.env"
+  info "Seerr:             http://apollo.local:${SEERR_PORT:-5055}"
 fi

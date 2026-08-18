@@ -34,6 +34,7 @@ tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 | 9696 | Prowlarr |
 | 8080 | qBittorrent web UI |
 | 6881 tcp+udp | qBittorrent torrent traffic |
+| 5055 | Seerr |
 | 53 | PiHole (planned) |
 
 Publishing ports is the design. Every user-facing service claims a host port and is linked
@@ -187,6 +188,7 @@ never as separate partial bodies.
 ├── radarr/config/
 ├── prowlarr/config/
 ├── qbittorrent/config/     # qBittorrent.conf, seeded once by up.sh
+├── seerr/config/           # settings.json + SQLite; users and request history
 ├── configarr/
 │   ├── config/             # config.yml, installed by up.sh when absent
 │   └── repos/              # cached TRaSH + Recyclarr template clones
@@ -333,11 +335,13 @@ No routing config, no name registration — publish the port, add the labels.
 
 ### The arr stack as built
 
-Sonarr, Radarr, Prowlarr and qBittorrent, plus Byparr (no published port, so no tile —
-the Cloudflare solver, replacing FlareSolverr, which stopped clearing modern managed
-challenges; same API, so Prowlarr registers it as a FlareSolverr-type indexer proxy),
-Configarr (no port, run-to-completion) and Ofelia (the scheduler that starts it). All bridge
-services on `nas-net`; only Jellyfin needs host networking.
+Sonarr, Radarr, Prowlarr and qBittorrent, plus Seerr (the request front-end — users sign in
+with their Jellyfin account, request media, and Seerr forwards to Sonarr/Radarr and tracks
+availability), Byparr (no published port, so no tile — the Cloudflare solver, replacing
+FlareSolverr, which stopped clearing modern managed challenges; same API, so Prowlarr
+registers it as a FlareSolverr-type indexer proxy), Configarr (no port, run-to-completion)
+and Ofelia (the scheduler that starts it). All bridge services on `nas-net`; only Jellyfin
+needs host networking.
 
 - Media is mounted **read-write** here, unlike Jellyfin's `:ro`. Sonarr and Radarr each see
   only the tree they manage (`/media/series`, `/media/movies`), and their root folders are the
@@ -352,12 +356,20 @@ services on `nas-net`; only Jellyfin needs host networking.
   scoped to Homepage, where the identity must be inspectable from outside because it gates
   socket access; none of these containers touch the socket. `UMASK=002` keeps what they write
   group-readable for Jellyfin, which runs as the same `1000:10`.
+- **Seerr is the exception to the previous point** — not an LSIO image (runs as `node`, 1000),
+  so it takes compose `user:` like Configarr and Ofelia. Its API key is injected as the
+  `API_KEY` environment variable, which Seerr writes over the `apiKey` stored in its
+  `settings.json` at **every** start — same never-persisted idiom as the arr keys, and it means
+  a key rotated in the Seerr UI does not survive a restart. It reaches Sonarr/Radarr by
+  container name over `nas-net`, but Jellyfin at the host LAN address (`192.168.0.231:8096`):
+  Jellyfin is host-networked and not on `nas-net`, and mDNS does not resolve inside containers.
 
 ### Secrets in this tier
 
 Each app's API key is injected as `<APP>__AUTH__APIKEY`, read at every start **in place of**
-`config.xml`, so the key is never persisted by the app. `up.sh` generates the three keys and
-the qBittorrent password into `arr.env` on first run and never regenerates them.
+`config.xml`, so the key is never persisted by the app; Seerr's rides the same flow as
+`API_KEY`. `up.sh` generates the four keys and the qBittorrent password into `arr.env` on
+first run and never regenerates them.
 
 `arr.env` therefore holds the only copy. Losing it does not error — each app quietly mints and
 persists a *new* key, and Prowlarr's sync, Configarr and all three Homepage widgets break at
@@ -464,6 +476,9 @@ torrent is not a config artifact and is not reproducible from this repo.
 | Configarr over Recyclarr | Reads `!env` natively, so the bootstrap needs no fragile generate-then-rewrite credential patching; actively tracks upstream template churn | Younger project; no built-in scheduler, so one is bolted on |
 | Ofelia as that scheduler | Keeps the daily cadence inside compose — no host cron for `down.sh` to clean up | A **second** container with root-equivalent socket access |
 | `down.sh` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
+| Seerr in the arr tier | Consumes the Sonarr/Radarr keys already in `arr.env`; same lifecycle and bootstrap | The tier grows a service that is not strictly an arr; `down.sh arr` deletes its request history |
+| Seerr's admin is the Jellyfin admin account | The first `/auth/jellyfin` call creates it — no second credential to mint or store | Bootstrap reads `jellyfin.env` across the tier boundary (subshell-scoped) |
+| Seerr → Jellyfin by LAN IP | Host-networked Jellyfin is off `nas-net`; container names and mDNS don't resolve | Breaks if the DHCP reservation ever moves |
 
 ### The standing assumption
 

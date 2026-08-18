@@ -5,7 +5,9 @@
 # DESTRUCTIVE. Everything Jellyfin knows — users, libraries, watch state,
 # metadata — lives in /volume2/docker/jellyfin and does not survive this.
 # Homepage's config goes too, including any tile edits made on the NAS. The arr
-# stack's config goes as well: indexers, quality profiles and download history.
+# stack's config goes as well: indexers, quality profiles and download history,
+# plus Seerr's users and request history — the wiring is reproducible from this
+# repo, but who requested what is not.
 # Media under /volume1 is never touched; nothing outside /volume2/docker is.
 #
 # Downloads are NOT deleted. Config is reproducible from this repo; a part-done
@@ -99,6 +101,7 @@ case " $STACKS " in
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${RADARR_CONFIG_DIR:-${SAFE_ROOT}/radarr/config}")"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${PROWLARR_CONFIG_DIR:-${SAFE_ROOT}/prowlarr/config}")"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${QBITTORRENT_CONFIG_DIR:-${SAFE_ROOT}/qbittorrent/config}")"
+    DELETE_PATHS="${DELETE_PATHS} $(dirname "${SEERR_CONFIG_DIR:-${SAFE_ROOT}/seerr/config}")"
     # dirname covers both config/ and repos/ under /volume2/docker/configarr.
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${CONFIGARR_CONFIG_DIR:-${SAFE_ROOT}/configarr/config}")"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${OFELIA_CONFIG_DIR:-${SAFE_ROOT}/ofelia/config}")"
@@ -215,7 +218,7 @@ done
 # A container started outside the -p convention lives under a different project
 # name and is missed by the calls above; clean up by name as a backstop.
 say "Removing any stray containers by name"
-for c in homepage jellyfin sonarr radarr prowlarr qbittorrent byparr configarr ofelia; do
+for c in homepage jellyfin sonarr radarr prowlarr qbittorrent seerr byparr configarr ofelia; do
   if docker ps -aq -f "name=^${c}$" | grep -q .; then
     run docker rm -f "$c" >/dev/null
     info "removed ${c}"

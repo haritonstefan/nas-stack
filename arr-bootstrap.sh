@@ -2,7 +2,8 @@
 # Configures a fresh arr stack over the APIs: root folders, the qBittorrent
 # download client, media-management settings, Prowlarr's app sync to Sonarr and
 # Radarr, the Byparr indexer proxy (with its tag on every indexer), the public
-# and private indexers, and a one-shot Configarr sync.
+# and private indexers, a one-shot Configarr sync, and Seerr's first-run setup
+# (Jellyfin sign-in, library sync, Sonarr/Radarr wiring).
 # Idempotent — safe to re-run.
 #
 # Private indexers are listed in ARR_INDEXERS_PRIVATE, with credentials read
@@ -23,7 +24,8 @@
 #   ./arr-bootstrap.sh --verbose
 #   SONARR_URL=http://apollo.local:8989 ./arr-bootstrap.sh
 #
-# Requires: curl, jq. Reads arr.env if present (for the API keys).
+# Requires: curl, jq. Reads arr.env if present (for the API keys), and
+# jellyfin.env for Seerr's Jellyfin sign-in (in a subshell — nothing leaks).
 #
 # Exit codes: 0 success. 1 precondition failure. 22 an API call returned a
 # non-2xx. There is deliberately no restart channel (Jellyfin's exit 10) —
@@ -65,6 +67,7 @@ fi
 SONARR_URL="${SONARR_URL:-http://127.0.0.1:8989}"
 RADARR_URL="${RADARR_URL:-http://127.0.0.1:7878}"
 PROWLARR_URL="${PROWLARR_URL:-http://127.0.0.1:9696}"
+SEERR_URL="${SEERR_URL:-http://127.0.0.1:5055}"
 
 SONARR_ROOT_FOLDER="${SONARR_ROOT_FOLDER:-/media/series}"
 RADARR_ROOT_FOLDER="${RADARR_ROOT_FOLDER:-/media/movies}"
@@ -77,6 +80,12 @@ ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv,limetorrents,torlock,t
 # No default: the credentials are secrets, so the list is opt-in via arr.env.
 ARR_INDEXERS_PRIVATE="${ARR_INDEXERS_PRIVATE:-}"
 ARR_RUN_CONFIGARR="${ARR_RUN_CONFIGARR:-1}"
+ARR_CONFIGURE_SEERR="${ARR_CONFIGURE_SEERR:-1}"
+# Jellyfin as Seerr must reach it: the host LAN address, because Jellyfin is
+# host-networked and not on nas-net — a container name will not resolve, and
+# .local usually does not resolve inside containers either.
+SEERR_JELLYFIN_HOST="${SEERR_JELLYFIN_HOST:-192.168.0.231}"
+SEERR_JELLYFIN_PORT="${SEERR_JELLYFIN_PORT:-8096}"
 
 # Addresses the containers use for each other over nas-net. Not the *_URL vars
 # above, which are how this script (running on the host) reaches them.
@@ -731,12 +740,207 @@ else
   say "Skipping Configarr (ARR_RUN_CONFIGARR=0) — ofelia still syncs on schedule"
 fi
 
+# --- seerr ---------------------------------------------------------------------
+
+# Deliberately after configarr: the Sonarr/Radarr wiring below picks the TRaSH
+# quality profiles configarr creates; run first it would bind requests to a
+# stock profile. Non-fatal throughout, like the indexers — a dead or not-yet-
+# built Jellyfin must not abort the arr bring-up. Nothing here is one-shot:
+# setup stays re-runnable until POST /settings/initialize, which is therefore
+# the last call, made only once everything before it succeeded.
+if [ "$ARR_CONFIGURE_SEERR" = "1" ]; then
+  say "Configuring Seerr"
+
+  configure_seerr() {
+    local i probe initialized
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+      info "[dry-run] would wait for seerr at ${SEERR_URL}"
+      info "[dry-run] POST /api/v1/auth/jellyfin — Jellyfin at ${SEERR_JELLYFIN_HOST}:${SEERR_JELLYFIN_PORT}, creds from jellyfin.env"
+      info "[dry-run] enable Movies/Series libraries; POST /api/v1/settings/{sonarr,radarr}; POST /api/v1/settings/initialize"
+      return 0
+    fi
+
+    if [ -z "${SEERR_API_KEY:-}" ]; then
+      warn "SEERR_API_KEY is unset in ${ENV_FILE} — run up.sh to generate it; skipping Seerr"
+      return 0
+    fi
+
+    # No /ping here; /api/v1/status is Seerr's unauthenticated equivalent, and
+    # the JSON shape is checked for the same reason wait_for checks it.
+    for i in $(seq 1 90); do
+      if probe=$(curl -fsS --max-time 5 "${SEERR_URL}/api/v1/status" 2>/dev/null) \
+         && printf '%s' "$probe" | jq -e '.version' >/dev/null 2>&1; then
+        info "seerr ready at ${SEERR_URL}"
+        break
+      fi
+      if [ "$i" -eq 90 ]; then
+        warn "seerr did not answer at ${SEERR_URL}/api/v1/status after 180s — skipping"
+        warn "check: docker logs seerr — then re-run ./arr-bootstrap.sh"
+        return 0
+      fi
+      sleep 2
+    done
+
+    initialized=$(curl -sS --max-time 5 "${SEERR_URL}/api/v1/settings/public" 2>/dev/null \
+      | jq -r '.initialized' 2>/dev/null) || initialized=""
+
+    if [ "$initialized" != "true" ]; then
+      # The Jellyfin admin credentials live in jellyfin.env — another tier's
+      # env file. Extracted in subshells so nothing else in that file can
+      # shadow this shell's variables (the shared-name rule in arr.env.example).
+      local jf_user="" jf_pass=""
+      if [ -f jellyfin.env ]; then
+        jf_user=$( ( set +u; . ./jellyfin.env >/dev/null 2>&1; printf '%s' "${JELLYFIN_ADMIN_USER:-}" ) ) || jf_user=""
+        jf_pass=$( ( set +u; . ./jellyfin.env >/dev/null 2>&1; printf '%s' "${JELLYFIN_ADMIN_PASSWORD:-}" ) ) || jf_pass=""
+      fi
+      if [ -z "$jf_user" ] || [ -z "$jf_pass" ]; then
+        warn "jellyfin.env is missing or has no admin credentials — skipping Seerr setup"
+        warn "re-run ./arr-bootstrap.sh once the jellyfin tier is up"
+        return 0
+      fi
+
+      # Probed from the host, which proves Jellyfin answers at the address Seerr
+      # will store; Seerr re-checks it from inside nas-net during sign-in.
+      if ! curl -fsS --max-time 5 "http://${SEERR_JELLYFIN_HOST}:${SEERR_JELLYFIN_PORT}/System/Info/Public" >/dev/null 2>&1; then
+        warn "Jellyfin not answering at ${SEERR_JELLYFIN_HOST}:${SEERR_JELLYFIN_PORT} — skipping Seerr setup"
+        return 0
+      fi
+
+      # First-ever call creates Seerr's admin (user 1) from this account and
+      # stores the media-server settings; on later runs it is a plain sign-in.
+      # The account must be a Jellyfin administrator — a plain user gets 403.
+      # serverType 2 = MediaServerType.JELLYFIN (numeric enum, see the spec).
+      # Deliberately not api(): this route takes no X-Api-Key — before the
+      # first user exists there is nobody for the key to authenticate as.
+      local body raw rc status out
+      body=$(jq -n --arg u "$jf_user" --arg p "$jf_pass" \
+               --arg h "$SEERR_JELLYFIN_HOST" --argjson port "$SEERR_JELLYFIN_PORT" \
+               '{username: $u, password: $p, hostname: $h, port: $port,
+                 useSsl: false, serverType: 2}') \
+        || { warn "could not build the sign-in body — skipping Seerr setup"; return 0; }
+      if [ "$VERBOSE" -eq 1 ]; then
+        echo "    --> POST ${SEERR_URL}/api/v1/auth/jellyfin" >&2
+        printf '        body: %s\n' "$(mask "$body")" >&2
+      fi
+      rc=0
+      raw=$(curl -sS -X POST "${SEERR_URL}/api/v1/auth/jellyfin" \
+              -H 'Content-Type: application/json' -d "$body" -w $'\n%{http_code}') || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        warn "POST /api/v1/auth/jellyfin — curl failed (exit ${rc}); skipping Seerr setup"
+        return 0
+      fi
+      status="${raw##*$'\n'}"
+      out="${raw%$'\n'*}"
+      case "$status" in
+        2*) info "signed in to Seerr as ${jf_user}" ;;
+        403)
+          warn "Seerr sign-in refused (403): '${jf_user}' is not a Jellyfin administrator"
+          warn "said: $(printf '%s' "$out" | head -c 300)"
+          return 0 ;;
+        *)
+          warn "Seerr sign-in failed (HTTP ${status}) — skipping Seerr setup"
+          warn "said: $(printf '%s' "$out" | head -c 300)"
+          return 0 ;;
+      esac
+
+      # sync pulls the library list from Jellyfin; enable REPLACES the enabled
+      # set (anything not passed is disabled), which is why this only runs
+      # before initialize, where the state is known to be fresh.
+      local libs ids
+      libs=$(api "$SEERR_URL" "$SEERR_API_KEY" GET '/api/v1/settings/jellyfin/library?sync=true') \
+        || { warn "library sync failed — finish Seerr setup in its UI"; return 0; }
+      ids=$(printf '%s' "$libs" | jq -r \
+        '[.[] | select(.name == "Movies" or .name == "Series") | .id] | join(",")')
+      if [ -z "$ids" ]; then
+        ids=$(printf '%s' "$libs" | jq -r '[.[].id] | join(",")')
+        [ -n "$ids" ] && warn "no libraries named Movies/Series — enabling all of them instead"
+      fi
+      if [ -z "$ids" ]; then
+        warn "Jellyfin reported no libraries — run jellyfin-bootstrap.sh first, then re-run this"
+        return 0
+      fi
+      api "$SEERR_URL" "$SEERR_API_KEY" GET "/api/v1/settings/jellyfin/library?enable=${ids}" >/dev/null \
+        || { warn "library enable failed — finish Seerr setup in its UI"; return 0; }
+      info "libraries enabled"
+    fi
+
+    # Idempotent by name, GET-list-then-skip — the same shape as Prowlarr's
+    # add_application. Hostnames are container names: this traffic stays on
+    # nas-net (matches SONARR_INTERNAL_URL / RADARR_INTERNAL_URL above).
+    add_seerr_app() {
+      # add_seerr_app <Name> <path> <host> <port> <api-key> <root> <preferred-profile> <extra-jq>
+      local name="$1" path="$2" host="$3" port="$4" app_key="$5" root="$6" preferred="$7" extra="$8"
+      local existing test_out profile_id profile_name body
+
+      existing=$(api "$SEERR_URL" "$SEERR_API_KEY" GET "/api/v1/settings/${path}" | jq -r '.[].name') \
+        || { warn "${name}: could not list existing instances — skipping"; return 0; }
+      if printf '%s\n' "$existing" | grep -Fxq "$name"; then
+        info "${name}: exists, skipping"
+        return 0
+      fi
+
+      # Seerr's own connection test doubles as profile discovery.
+      body=$(jq -n --arg h "$host" --argjson p "$port" --arg k "$app_key" \
+               '{hostname: $h, port: $p, apiKey: $k, useSsl: false, baseUrl: ""}')
+      test_out=$(api "$SEERR_URL" "$SEERR_API_KEY" POST "/api/v1/settings/${path}/test" "$body") \
+        || { warn "${name}: connection test failed — add it in the Seerr UI"; return 0; }
+
+      # Prefer the TRaSH profile configarr installs; fall back to the first.
+      profile_id=$(printf '%s' "$test_out" | jq -r --arg n "$preferred" \
+        '(.profiles[] | select(.name == $n) | .id) // .profiles[0].id // empty')
+      profile_name=$(printf '%s' "$test_out" | jq -r --arg n "$preferred" \
+        '(.profiles[] | select(.name == $n) | .name) // .profiles[0].name // empty')
+      if [ -z "$profile_id" ]; then
+        warn "${name}: no quality profiles returned — skipping"
+        return 0
+      fi
+      [ "$profile_name" != "$preferred" ] \
+        && warn "${name}: profile '${preferred}' not found (configarr not synced yet?) — using '${profile_name}'"
+
+      body=$(jq -n --arg name "$name" --arg h "$host" --argjson p "$port" \
+               --arg k "$app_key" --argjson pid "$profile_id" --arg pname "$profile_name" \
+               --arg dir "$root" \
+               '{name: $name, hostname: $h, port: $p, apiKey: $k, useSsl: false,
+                 baseUrl: "", activeProfileId: $pid, activeProfileName: $pname,
+                 activeDirectory: $dir, is4k: false, isDefault: true,
+                 syncEnabled: true, preventSearch: false}')
+      [ -n "$extra" ] && body=$(printf '%s' "$body" | jq "$extra")
+      api "$SEERR_URL" "$SEERR_API_KEY" POST "/api/v1/settings/${path}" "$body" >/dev/null \
+        || { warn "${name}: create failed — add it in the Seerr UI"; return 0; }
+      info "${name}: wired (profile '${profile_name}', root ${root})"
+    }
+
+    # The extra-jq carries each schema's own required field: enableSeasonFolders
+    # is required by SonarrSettings, minimumAvailability by RadarrSettings.
+    add_seerr_app Sonarr sonarr sonarr 8989 "$SONARR_API_KEY" "$SONARR_ROOT_FOLDER" \
+      "WEB-1080p" '.enableSeasonFolders = true'
+    add_seerr_app Radarr radarr radarr 7878 "$RADARR_API_KEY" "$RADARR_ROOT_FOLDER" \
+      "HD Bluray + WEB" '.minimumAvailability = "released"'
+
+    if [ "$initialized" != "true" ]; then
+      if api "$SEERR_URL" "$SEERR_API_KEY" POST /api/v1/settings/initialize >/dev/null; then
+        info "Seerr initialized — sign in with the Jellyfin account"
+      else
+        warn "initialize failed — setup stays re-runnable; finish in the Seerr UI"
+      fi
+    else
+      info "already initialized"
+    fi
+    return 0
+  }
+  configure_seerr
+else
+  say "Skipping Seerr (ARR_CONFIGURE_SEERR=0)"
+fi
+
 # --- summary -----------------------------------------------------------------
 
 say "Done"
 info "Sonarr:      ${SONARR_URL}   (root ${SONARR_ROOT_FOLDER})"
 info "Radarr:      ${RADARR_URL}   (root ${RADARR_ROOT_FOLDER})"
 info "Prowlarr:    ${PROWLARR_URL}"
+info "Seerr:       ${SEERR_URL}"
 cat <<'EOF'
 
     Still manual: any private indexer not covered by ARR_INDEXERS_PRIVATE

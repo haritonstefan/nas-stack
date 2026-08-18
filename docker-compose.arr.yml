@@ -151,6 +151,46 @@ services:
       - homepage.widget.username=${QBITTORRENT_USER:-admin}
       - homepage.widget.password=${QBITTORRENT_PASSWORD:?QBITTORRENT_PASSWORD is unset — run up.sh to generate it}
 
+  # Media request front-end for Jellyfin users. Not a LinuxServer.io image — it
+  # runs as node (1000), so identity is compose `user:` like configarr, not
+  # PUID/PGID env. Reaches Sonarr/Radarr by container name over nas-net, but
+  # Jellyfin at the host LAN address: Jellyfin is host-networked and off nas-net.
+  seerr:
+    image: ghcr.io/seerr-team/seerr:v3.4.1
+    container_name: seerr
+    restart: unless-stopped
+    # node is PID 1 and reaps no zombies; upstream's compose sets this too.
+    init: true
+    user: "${PUID:-1000}:${PGID:-10}"
+    environment:
+      TZ: ${TZ:-Europe/Bucharest}
+      PORT: "5055"
+      LOG_LEVEL: info
+      # Overwrites the stored apiKey in settings.json at every start — same
+      # never-persisted idiom as the arr keys, so the widget below and
+      # arr-bootstrap.sh work from first boot.
+      API_KEY: ${SEERR_API_KEY:?SEERR_API_KEY is unset — run up.sh to generate it}
+    ports:
+      - "${SEERR_PORT:-5055}:5055"
+    volumes:
+      - ${SEERR_CONFIG_DIR:-/volume2/docker/seerr/config}:/app/config
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=Seerr
+      - homepage.icon=seerr.png
+      - homepage.href=http://apollo.local:${SEERR_PORT:-5055}
+      - homepage.description=Media requests
+      - homepage.widget.type=seerr
+      - homepage.widget.url=http://seerr:5055
+      - homepage.widget.key=${SEERR_API_KEY:?SEERR_API_KEY is unset — run up.sh to generate it}
+
   # No published port and no homepage labels: internal-only, so a tile would be
   # a dead end. Registered as Prowlarr's indexer proxy by arr-bootstrap.sh;
   # Prowlarr calls it only when a Cloudflare challenge is detected on a tagged

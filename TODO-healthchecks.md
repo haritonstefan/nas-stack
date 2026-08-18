@@ -17,7 +17,7 @@ reports healthy/unhealthy without a compose-level entry.)
 
 ## Scope
 
-Two services: Homepage and Jellyfin.
+Three services: Homepage, Jellyfin and Seerr.
 
 ### Homepage
 
@@ -37,6 +37,24 @@ neither.
 
 Homepage binds host `:80` and is the entrypoint to everything, so it is the service where
 "running but wedged" is most user-visible. Best candidate to do first.
+
+### Seerr
+
+Upstream's own docs ship a compose healthcheck, so this one is closest to copy-paste-ready
+— deliberately deferred with the others rather than being the only service that has one:
+
+```yaml
+healthcheck:
+  test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/status || exit 1
+  start_period: 20s
+  timeout: 3s
+  interval: 15s
+  retries: 3
+```
+
+Same caveat as Homepage: confirm `wget` exists in `ghcr.io/seerr-team/seerr:v3.4.1`
+(`docker exec seerr which wget curl`) before trusting it — upstream documenting it is a
+strong hint, not proof for this exact tag.
 
 ### Jellyfin
 

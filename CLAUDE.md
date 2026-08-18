@@ -8,7 +8,7 @@ One standalone `docker-compose.<tier>.yml` per tier, no shared compose file, no 
 
 - **`core`** — `nas-net` and Homepage (dashboard on `:80`, the entrypoint to everything). Everything else depends on it; it depends on nothing.
 - **`jellyfin`** — built.
-- **`arr`** — sonarr/radarr/prowlarr/qbittorrent, plus byparr, configarr and ofelia. Built.
+- **`arr`** — sonarr/radarr/prowlarr/qbittorrent/seerr, plus byparr, configarr and ofelia. Built.
 - **`pihole`** — not yet built.
 
 Bring-up order: `core` first, then consumer stacks in any order.
@@ -24,8 +24,9 @@ Bring-up order: `core` first, then consumer stacks in any order.
   into the Homepage config dir only when absent, so on-NAS edits survive.
 - `qbittorrent-config/qBittorrent.conf` — same install-only-when-absent idiom. `up.sh`
   substitutes the `__PLACEHOLDER__` tokens (password hash, paths, seed cap) at install time.
-- `reference/` — the vendored Jellyfin OpenAPI spec (query it with `jq`, never `Read` it)
-  plus recipes in `reference/README.md`.
+- `reference/` — the vendored API specs: Jellyfin's (JSON — query it with `jq`, never `Read`
+  it) and Seerr's (`seerr-api.yml`, multi-line YAML, safe to grep + line-read). Recipes in
+  `reference/README.md`.
 - `TODO-healthchecks.md` — the one open work item.
 
 ## Your role
@@ -65,7 +66,7 @@ Run this on the NAS and paste the output:
 - PUID/PGID `1000:10`. `RENDER_GID=105` (Intel iGPU, `/dev/dri/renderD128`). `TZ=Europe/Bucharest`.
 - LAN IP `192.168.0.231` (DHCP reservation), `apollo.local` via mDNS.
 - Bind-mount sources are **not** auto-created with correct ownership — `up.sh` mkdir+chowns them, so run it as root.
-- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`9696`/`8080` → Sonarr/Radarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent. `0.0.0.0:53` free → PiHole. UGOS on 9999.
+- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`9696`/`8080` → Sonarr/Radarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr. `0.0.0.0:53` free → PiHole. UGOS on 9999.
 - Docker daemon API `1.54` — pin images to exact patch versions and check compatibility against this.
 - Compose files must not hardcode host paths — all via `.env` (gitignored; `<tier>.env.example` is the template).
 
@@ -147,4 +148,8 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
 - **Ofelia is the second container with the docker socket**, after Homepage — root-equivalent host access, accepted for the same reasons and set up the same way (primary GID via `user: "${PUID}:${DOCKER_GID}"`, which survives a privilege drop; `:ro` restricts nothing about the API).
 - **What configarr is deliberately not allowed to manage**, all of it left to `arr-bootstrap.sh`: `download_clients` (it would rewrite the qBittorrent password, and the client definition is `arr-bootstrap.sh`'s contract — including `removeCompletedDownloads: true`), `root_folders` (deletes and recreates to match the file), `delay_profiles` (deletes any profile not listed, and its example is usenet-defaulted), `media_naming` (would rename the existing library), and every `delete_unmanaged_*` toggle.
 - **`down.sh` never deletes the download tree**, though it sits under `SAFE_ROOT` and would be accepted. Config comes back from this repo; a part-done or still-seeding torrent does not.
+- **Seerr is the request front-end** (`ghcr.io/seerr-team/seerr` — the merged successor of Jellyseerr/Overseerr; those names live on only as Homepage widget aliases). Not an LSIO image: identity via compose `user:`, config at `/app/config`. Its API key is injected as the `API_KEY` env var, which Seerr **writes over `settings.json`'s stored `apiKey` at every start** — so `arr.env` is the only source of truth and rotating the key in the Seerr UI silently doesn't survive a restart. Auth header is `X-Api-Key`, same as the arr apps.
+- **Seerr's setup is re-runnable until `POST /api/v1/settings/initialize`** — nothing is one-shot like Jellyfin's wizard, which is why the bootstrap calls initialize last, only after everything else succeeded. `POST /api/v1/auth/jellyfin` needs **no prior auth**: with no users it creates Seerr's admin (user 1) from the Jellyfin account given — which must be a Jellyfin **administrator**, else 403 — and stores the media-server settings; `serverType` is the numeric enum (`2` = Jellyfin). On later runs the same call is a plain sign-in. After user 1 exists, `X-Api-Key` acts as admin for everything.
+- **Seerr reaches Jellyfin at the host LAN address (`192.168.0.231:8096`), never a container name** — Jellyfin is host-networked and off `nas-net`, and mDNS doesn't resolve inside containers. Sonarr/Radarr are wired by container name (`sonarr:8989`, `radarr:7878`) like all other nas-net traffic. The Jellyfin admin credentials come from `jellyfin.env`, extracted in a **subshell** — never `set -a`-sourced into the arr shell (shared names would collide, see `arr.env.example`).
+- **The Seerr bootstrap section runs after configarr and is non-fatal throughout** — after, because it binds requests to the TRaSH profiles (`WEB-1080p` / `HD Bluray + WEB`) that configarr creates, falling back to the first profile with a warning; non-fatal, because a dead or not-yet-built Jellyfin must not abort the arr bring-up (it warns and skips, and a re-run picks up where it left off). `GET /settings/jellyfin/library?enable=` **replaces** the enabled set — any library not listed is disabled — so the bootstrap only touches it pre-initialize.
 - **DLNA is a plugin** (not core since 10.10) and bootstrap installs it: resolve it in `GET /Packages` (never hardcode the name), `POST /Packages/Installed/{name}`, then poll `GET /Plugins`. The `204` only means *queued* — a failure past it shows up only in the Jellyfin log. Casing differs per endpoint: `PackageInfo` is camelCase (`name`/`guid`), `PluginInfo` is PascalCase (`Name`/`Id`/`Status`). **No mid-run restart** — Jellyfin does not hot-load plugins, so a new one sits at `Status: Restart` and rides the existing deferred-restart channel (`exit 10` → `up.sh` restarts → scan). Every DLNA call is non-fatal: a failed install must not abort before the base URL is asserted. `JELLYFIN_INSTALL_DLNA=0` skips it.

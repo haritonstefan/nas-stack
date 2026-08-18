@@ -50,3 +50,44 @@ image — a copy reading `12.0.0` came from upstream and describes another branc
 curl -sS http://apollo.local:8096/api-docs/openapi.json -o reference/jellyfin-openapi.json
 jq -r '.info.version' reference/jellyfin-openapi.json   # expect 10.11.11
 ```
+
+## `seerr-api.yml`
+
+Seerr's OpenAPI spec, vendored from the pinned image tag (the spec file lives
+at the repo root of the release tag):
+
+```sh
+curl -sSL https://raw.githubusercontent.com/seerr-team/seerr/v3.4.1/seerr-api.yml -o reference/seerr-api.yml
+```
+
+Refresh it whenever the image tag in `docker-compose.arr.yml` changes — same
+tag, always. Note `.info.version` reads `1.0.0`: that is the *API* version, not
+the app release, so it cannot confirm a match the way Jellyfin's can; the URL
+tag is the only version pin.
+
+It's YAML, so `jq` needs a one-time conversion (no `yq` assumed):
+
+```sh
+python3 -c 'import sys,yaml,json; json.dump(yaml.safe_load(sys.stdin), sys.stdout)' \
+  < reference/seerr-api.yml > /tmp/seerr-api.json
+```
+
+Or query the YAML directly — it is multi-line, so unlike the Jellyfin JSON it
+is safe to grep for a path and read that line range:
+
+```sh
+grep -n -E "^  /(auth|settings)/" reference/seerr-api.yml   # locate a route
+grep -n -E "^    [A-Za-z]+Settings:" reference/seerr-api.yml  # locate a schema
+```
+
+Facts already mined from it (v3.4.1), used by `arr-bootstrap.sh`:
+
+- `POST /auth/jellyfin` takes `serverType` as a **number** — `2` is
+  `MediaServerType.JELLYFIN` (from `server/constants/server.ts` at the tag).
+- `GET /settings/jellyfin/library?sync=true&enable=<id>,<id>` — `enable`
+  **replaces** the enabled set; any library not listed is disabled.
+- `SonarrSettings` requires `enableSeasonFolders`; `RadarrSettings` requires
+  `minimumAvailability`. Both require `name/hostname/port/apiKey/useSsl/`
+  `activeProfileId/activeProfileName/activeDirectory/is4k/isDefault`.
+- `POST /settings/{sonarr,radarr}/test` needs only
+  `{hostname, port, apiKey, useSsl}` and returns the quality profiles.
