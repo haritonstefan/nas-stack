@@ -245,6 +245,59 @@ if [ "$SCAN_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# Homepage's Jellyfin widget authenticates with a server-minted API key
+# (Dashboard -> API Keys), and its scan-status widget polls the "Scan media
+# library" scheduled task by id. Neither value can be seeded via the
+# environment — the key lives in Jellyfin's database, the id is derived from
+# the task's type name — so both are read here, post-auth, and written back to
+# jellyfin.env for docker compose to inject as container labels. up.sh
+# recreates the container when the labels lag the file (a plain restart keeps
+# the old ones). Idempotent: the key is matched by AppName on re-runs.
+persist_env() { # persist_env <VAR> <value> — write back to $ENV_FILE
+  local var="$1" value="$2"
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "    WARNING: ${ENV_FILE} not found — set ${var}=${value} in it yourself" >&2
+    return 0
+  fi
+  grep -Fqx "${var}=${value}" "$ENV_FILE" && return 0
+  grep -v "^${var}=" "$ENV_FILE" > "${ENV_FILE}.tmp" || true
+  printf '%s=%s\n' "$var" "$value" >> "${ENV_FILE}.tmp"
+  cat "${ENV_FILE}.tmp" > "$ENV_FILE"   # keeps the original owner and mode
+  rm -f "${ENV_FILE}.tmp"
+  echo "    ${var} saved to ${ENV_FILE}"
+}
+
+echo "==> Homepage widget credentials"
+if [ "$DRY_RUN" -eq 0 ]; then
+  API_KEY=$(api GET /Auth/Keys \
+    | jq -r '[.Items[]? | select(.AppName == "Homepage")][0].AccessToken // empty')
+  if [ -n "$API_KEY" ]; then
+    echo "    API key exists, reusing"
+  else
+    # POST answers 204 with no body; the token is only readable via the GET.
+    api POST '/Auth/Keys?app=Homepage' >/dev/null
+    API_KEY=$(api GET /Auth/Keys \
+      | jq -r '[.Items[]? | select(.AppName == "Homepage")][0].AccessToken // empty')
+    if [ -z "$API_KEY" ]; then
+      echo "ERROR: key created but absent from GET /Auth/Keys — check the Jellyfin log." >&2
+      exit 1
+    fi
+    echo "    API key created (AppName: Homepage)"
+  fi
+  persist_env JELLYFIN_API_KEY "$API_KEY"
+
+  SCAN_TASK_ID=$(api GET /ScheduledTasks \
+    | jq -r '[.[] | select(.Key == "RefreshLibrary")][0].Id // empty')
+  if [ -n "$SCAN_TASK_ID" ]; then
+    persist_env JELLYFIN_SCAN_TASK_ID "$SCAN_TASK_ID"
+  else
+    echo "    WARNING: no Key=RefreshLibrary task in /ScheduledTasks —" >&2
+    echo "             the dashboard's scan-status widget will stay empty." >&2
+  fi
+else
+  echo "    [dry-run] GET /Auth/Keys (POST if missing), GET /ScheduledTasks" >&2
+fi
+
 echo "==> Creating libraries"
 if [ "$DRY_RUN" -eq 0 ]; then
   EXISTING=$(api GET /Library/VirtualFolders | jq -r '.[].Name')

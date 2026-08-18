@@ -30,3 +30,23 @@ services:
       - homepage.icon=jellyfin.png
       - homepage.href=http://apollo.local:8096
       - homepage.description=Media server
+      # widget urls are fetched by the Homepage container, so they use the host
+      # LAN IP: Jellyfin is host-networked and off nas-net, and neither
+      # container names nor .local resolve from inside a container.
+      # JELLYFIN_API_KEY and JELLYFIN_SCAN_TASK_ID are minted by
+      # jellyfin-bootstrap.sh (not up.sh), so they are legitimately empty on
+      # the first bring-up — up.sh recreates this container once the bootstrap
+      # has written them, because labels are baked in at container create.
+      - homepage.widgets[0].type=jellyfin
+      - homepage.widgets[0].url=http://${JELLYFIN_LAN_HOST:-192.168.0.231}:8096
+      - homepage.widgets[0].key=${JELLYFIN_API_KEY:-}
+      - homepage.widgets[0].enableBlocks=true
+      - homepage.widgets[0].enableUser=true
+      - homepage.widgets[0].showEpisodeNumber=true
+      # Library-scan status (Idle/Running) — the jellyfin widget has no such
+      # field, so it is read straight off the scheduled task.
+      - homepage.widgets[1].type=customapi
+      - homepage.widgets[1].url=http://${JELLYFIN_LAN_HOST:-192.168.0.231}:8096/ScheduledTasks/${JELLYFIN_SCAN_TASK_ID:-}
+      - homepage.widgets[1].headers.X-Emby-Token=${JELLYFIN_API_KEY:-}
+      - homepage.widgets[1].mappings[0].field=State
+      - homepage.widgets[1].mappings[0].label=Library scan

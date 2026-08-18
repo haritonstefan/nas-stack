@@ -247,11 +247,14 @@ validator_for() {
 
 # --- env file read/write --------------------------------------------------------
 
-# Generated once by up.sh and load-bearing forever — never written, cleared,
+# Generated once by up.sh (or, for the Jellyfin widget values, minted by
+# jellyfin-bootstrap.sh) and load-bearing forever — never written, cleared,
 # or displayed here.
 is_secret() {
   case "$1" in
     SONARR_API_KEY|RADARR_API_KEY|PROWLARR_API_KEY|SEERR_API_KEY|QBITTORRENT_PASSWORD)
+      return 0 ;;
+    JELLYFIN_API_KEY|JELLYFIN_SCAN_TASK_ID)
       return 0 ;;
   esac
   return 1
@@ -578,7 +581,7 @@ skip_in_walk() { # skip_in_walk <tier> <var>
     core:HOMEPAGE_ALLOWED_HOSTS) return 0 ;;
     jellyfin:MEDIA_*_DIR) return 0 ;;
     jellyfin:JELLYFIN_SERVER_NAME|jellyfin:JELLYFIN_ADMIN_USER|jellyfin:JELLYFIN_ADMIN_PASSWORD) return 0 ;;
-    jellyfin:RENDER_GID|jellyfin:JELLYFIN_LOCAL_SUBNET) return 0 ;;
+    jellyfin:RENDER_GID|jellyfin:JELLYFIN_LOCAL_SUBNET|jellyfin:JELLYFIN_LAN_HOST) return 0 ;;
     arr:ARR_MOVIES_DIR|arr:ARR_SERIES_DIR|arr:SEERR_JELLYFIN_HOST) return 0 ;;
     arr:ARR_INSTALL_INDEXERS|arr:ARR_INDEXERS|arr:ARR_INDEXERS_PRIVATE|arr:ARR_INDEXER_*) return 0 ;;
   esac
@@ -747,6 +750,16 @@ jellyfin_section() {
     def="$REPLY_VALUE"
   fi
   stage jellyfin RENDER_GID "$def"
+
+  cur=$(env_get jellyfin JELLYFIN_LAN_HOST); ex=$(env_get_example jellyfin JELLYFIN_LAN_HOST)
+  def=$(pick_default "$cur" "$ex" "$DET_LAN_IP")
+  if [ "$ADVANCED" -eq 1 ]; then
+    info "How Homepage (a container on nas-net) reaches Jellyfin (host-networked)"
+    info "for its dashboard widgets: must be the LAN IP."
+    ask "JELLYFIN_LAN_HOST" "$def" is_nonempty
+    def="$REPLY_VALUE"
+  fi
+  stage jellyfin JELLYFIN_LAN_HOST "$def"
 
   cur=$(env_get jellyfin JELLYFIN_LOCAL_SUBNET); ex=$(env_get_example jellyfin JELLYFIN_LOCAL_SUBNET)
   local det_subnet=""

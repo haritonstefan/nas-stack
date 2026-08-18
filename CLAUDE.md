@@ -133,6 +133,7 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
   jq -r '.paths | to_entries[] | select(.key|test("^/Startup")) | "\(.key) [\(.value|keys|join(","))]"' reference/jellyfin-openapi.json
   ```
 
+- **The Homepage widget secrets are bootstrap-minted, not up.sh-generated.** `jellyfin-bootstrap.sh` creates the `Homepage` API key via `/Auth/Keys` (keys live in Jellyfin's database and cannot be env-seeded) and resolves the `RefreshLibrary` scheduled-task id, writing both back to `jellyfin.env`. They reach Homepage as container labels (`homepage.widgets[N].*`), which are **baked in at container create — `docker restart` never refreshes them** — so `up.sh` recreates the container via compose when the `homepage.widgets[0].key` label lags the file. Empty on first bring-up by necessity, so unlike other secrets these two default to empty in the compose file. The widget URLs use `JELLYFIN_LAN_HOST` (host LAN IP) because Homepage fetches them itself and Jellyfin is host-networked. A wiped Jellyfin config invalidates the key; a bootstrap re-run mints a fresh one and triggers the recreate.
 - Logs live in `/volume2/docker/jellyfin/config/log/` — inside the directory a reset wipes. Grab them first.
 
 ## Arr

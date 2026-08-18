@@ -505,13 +505,32 @@ if want jellyfin; then
       # shellcheck disable=SC2086
       ./jellyfin-bootstrap.sh $BOOTSTRAP_ARGS || BOOTSTRAP_RC=$?
       case "$BOOTSTRAP_RC" in
-        0)  info "no restart needed" ;;
-        10) say "Restarting Jellyfin to apply pending changes"
-            docker restart jellyfin >/dev/null
-            info "restarted" ;;
+        0|10) ;;
         *)  echo "ERROR: jellyfin-bootstrap.sh failed (exit ${BOOTSTRAP_RC})." >&2
             exit "$BOOTSTRAP_RC" ;;
       esac
+
+      # The bootstrap may have minted JELLYFIN_API_KEY/JELLYFIN_SCAN_TASK_ID
+      # into jellyfin.env, but the Homepage widget labels were baked into the
+      # container at create time and `docker restart` keeps the old ones — only
+      # a recreate refreshes them. compose_up recreates exactly when the
+      # rendered config changed, and that recreate also covers a pending
+      # exit-10 restart. Re-sourced in a subshell: this shell still holds the
+      # pre-bootstrap values.
+      # shellcheck disable=SC1091
+      NEW_WIDGET_KEY=$( . ./jellyfin.env && printf '%s' "${JELLYFIN_API_KEY:-}" )
+      CUR_WIDGET_KEY=$(docker inspect jellyfin \
+        --format '{{ index .Config.Labels "homepage.widgets[0].key" }}' 2>/dev/null || true)
+      if [ -n "$NEW_WIDGET_KEY" ] && [ "$NEW_WIDGET_KEY" != "$CUR_WIDGET_KEY" ]; then
+        say "Recreating Jellyfin to publish the Homepage widget labels"
+        compose_up jellyfin
+      elif [ "$BOOTSTRAP_RC" -eq 10 ]; then
+        say "Restarting Jellyfin to apply pending changes"
+        docker restart jellyfin >/dev/null
+        info "restarted"
+      else
+        info "no restart needed"
+      fi
 
       # Scan last, after any restart: it walks the whole media HDD, and a
       # restart moments in would cut it short.
