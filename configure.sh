@@ -240,7 +240,8 @@ validator_for() {
     QBITTORRENT_SEED_RATIO)          printf 'is_seed_ratio' ;;
     QBITTORRENT_SEED_MINUTES)        printf 'is_seed_minutes' ;;
     JELLYFIN_SCAN_ON_BOOTSTRAP|JELLYFIN_INSTALL_DLNA) printf 'is_01' ;;
-    ARR_INSTALL_INDEXERS|ARR_RUN_CONFIGARR|ARR_CONFIGURE_SEERR) printf 'is_01' ;;
+    # ARR_CONFIGURE_SEERR is SEERR_CONFIGURE's pre-rename name, still honoured.
+    ARR_INSTALL_INDEXERS|ARR_RUN_CONFIGARR|SEERR_CONFIGURE|ARR_CONFIGURE_SEERR) printf 'is_01' ;;
     *)                               printf '' ;;
   esac
 }

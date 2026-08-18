@@ -580,6 +580,38 @@ if want arr; then
   fi
 fi
 
+# --- seerr bootstrap ---------------------------------------------------------
+
+# After arr-bootstrap.sh, not merged into it: Seerr binds requests to the TRaSH
+# quality profiles Configarr creates there, so running it earlier would silently
+# bind them to a stock profile.
+#
+# Its failure is deferred rather than immediate. Seerr is the last thing
+# configured and nothing else depends on it, so a bring-up that got this far has
+# a working stack worth keeping — but the failure must not vanish either, which
+# is what used to happen when this was a warn-and-continue block inside
+# arr-bootstrap.sh. So: carry on, report it loudly in the summary, exit non-zero.
+SEERR_RC=0
+if want arr; then
+  if [ "$RUN_BOOTSTRAP" -eq 0 ]; then
+    say "Skipping Seerr bootstrap (--no-bootstrap)"
+  else
+    say "Configuring Seerr"
+    SEERR_BOOTSTRAP_ARGS=""
+    [ "$VERBOSE" -eq 1 ] && SEERR_BOOTSTRAP_ARGS="--verbose"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      # shellcheck disable=SC2086
+      ./seerr-bootstrap.sh --dry-run $SEERR_BOOTSTRAP_ARGS 2>&1 | sed 's/^/    /' || true
+    else
+      # Not piped, for the same reason as the arr bootstrap above: a failure's
+      # diagnostics must arrive in order, and this script's whole point is that
+      # its failure output is the diagnosis.
+      # shellcheck disable=SC2086
+      ./seerr-bootstrap.sh $SEERR_BOOTSTRAP_ARGS || SEERR_RC=$?
+    fi
+  fi
+fi
+
 # --- summary -----------------------------------------------------------------
 
 say "Done"
@@ -598,3 +630,23 @@ if want arr; then
   info "Seerr:             http://apollo.local:${SEERR_PORT:-5055}"
   info "Next: run ./arr-indexers.sh to add the trackers to Prowlarr"
 fi
+
+# The stack is up either way; this is the one thing that got left unconfigured,
+# and it is reported here rather than mid-run so it cannot scroll past unnoticed.
+if [ "$SEERR_RC" -ne 0 ]; then
+  echo >&2
+  echo "  ############################################################" >&2
+  echo "  # Seerr was NOT configured (seerr-bootstrap.sh exit ${SEERR_RC})." >&2
+  echo "  #" >&2
+  echo "  # The rest of the stack is up. Seerr is reachable but will show" >&2
+  echo "  # its first-run wizard, and Homepage's Seerr widget will return" >&2
+  echo "  # 403 until setup completes — its API key only carries admin" >&2
+  echo "  # rights once Seerr has a user." >&2
+  echo "  #" >&2
+  echo "  # The cause is in the output above. Fix it, then:" >&2
+  echo "  #   ./seerr-bootstrap.sh --verbose" >&2
+  echo "  ############################################################" >&2
+  echo >&2
+fi
+
+exit "$SEERR_RC"

@@ -446,8 +446,13 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 
 `sudo ./up.sh` takes a fresh clone to running: env files from the examples, host
 directories with correct ownership, generated arr secrets, `core` then `jellyfin` then `arr`,
-then each stack's API bootstrap. Idempotent — existing `.env` files are never overwritten and
-configured steps are skipped. `./down.sh` reverses it and is a **dry run by default**.
+then each stack's API bootstrap — `jellyfin-bootstrap.sh`, `arr-bootstrap.sh`, and finally
+`seerr-bootstrap.sh`, which must come last because it binds requests to the quality profiles
+Configarr creates in the step before. Idempotent — existing `.env` files are never overwritten
+and configured steps are skipped. A Seerr bootstrap failure is **deferred, not fatal**: the
+stack stays up, but `up.sh` prints a banner in its summary and exits non-zero, so an
+unconfigured Seerr can no longer pass as a successful bring-up.
+`./down.sh` reverses it and is a **dry run by default**.
 `./configure.sh` is the optional interactive front-end: it detects host facts and fills in
 the `.env` files (never the generated secrets), so `up.sh` itself stays non-interactive.
 
@@ -495,6 +500,7 @@ torrent is not a config artifact and is not reproducible from this repo.
 | `down.sh` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
 | Seerr in the arr tier | Consumes the Sonarr/Radarr keys already in `arr.env`; same lifecycle and bootstrap | The tier grows a service that is not strictly an arr; `down.sh arr` deletes its request history |
 | Seerr's admin is the Jellyfin admin account | The first `/auth/jellyfin` call creates it — no second credential to mint or store | Bootstrap reads `jellyfin.env` across the tier boundary (subshell-scoped) |
+| Seerr's bootstrap is its own script, failing non-zero | As part of `arr-bootstrap.sh` every step was `warn; return 0`, so a Seerr that configured *nothing* was indistinguishable from one skipped on purpose — `up.sh` exited 0 over it | A fourth automation script, and `up.sh` now has an exit code that depends on a non-essential service |
 | Seerr → Jellyfin by LAN IP | Host-networked Jellyfin is off `nas-net`; container names and mDNS don't resolve | Breaks if the DHCP reservation ever moves |
 
 ### The standing assumption
