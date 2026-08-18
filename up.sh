@@ -13,7 +13,9 @@ Creates .env files from the examples, creates host directories with the right
 ownership, starts core (Homepage on :80, which creates nas-net), starts
 Jellyfin (host networking), then configures it over its API via
 jellyfin-bootstrap.sh. Starts the arr stack (Sonarr/Radarr/Prowlarr/
-qBittorrent/Seerr) and configures it via arr-bootstrap.sh.
+qBittorrent/Seerr) and configures it via arr-bootstrap.sh. The trackers (the
+Byparr proxy and the Prowlarr indexers) are not added here — run
+./arr-indexers.sh afterwards.
 
 Generates the arr API keys and the qBittorrent password into arr.env on first
 run, and never regenerates them.
@@ -572,4 +574,5 @@ if want arr; then
   info "qBittorrent:       http://apollo.local:${QBITTORRENT_PORT:-8080}"
   info "qBittorrent login: ${QBITTORRENT_USER:-admin} / see QBITTORRENT_PASSWORD in arr.env"
   info "Seerr:             http://apollo.local:${SEERR_PORT:-5055}"
+  info "Next: run ./arr-indexers.sh to add the trackers to Prowlarr"
 fi

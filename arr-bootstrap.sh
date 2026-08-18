@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # Configures a fresh arr stack over the APIs: root folders, the qBittorrent
 # download client, media-management settings, Prowlarr's app sync to Sonarr and
-# Radarr, the Byparr indexer proxy (with its tag on every indexer), the public
-# and private indexers, a one-shot Configarr sync, and Seerr's first-run setup
-# (Jellyfin sign-in, library sync, Sonarr/Radarr wiring).
+# Radarr, a one-shot Configarr sync, and Seerr's first-run setup (Jellyfin
+# sign-in, library sync, Sonarr/Radarr wiring).
 # Idempotent — safe to re-run.
 #
-# Private indexers are listed in ARR_INDEXERS_PRIVATE, with credentials read
-# from ARR_INDEXER_<NAME>_USER / ARR_INDEXER_<NAME>_PASS (<NAME> is the
-# definition name uppercased) — see arr.env.example. One missing credential
-# skips that indexer with a warning; it never aborts the run.
+# The trackers — the Byparr indexer proxy and the public/private indexers —
+# live in ./arr-indexers.sh, run separately after up.sh.
 #
 # Run AFTER `docker compose ... up -d`. Unlike Jellyfin's, nothing here is
 # one-shot: every step reads the current state first and skips what is already
@@ -75,10 +72,6 @@ RADARR_ROOT_FOLDER="${RADARR_ROOT_FOLDER:-/media/movies}"
 QBITTORRENT_USER="${QBITTORRENT_USER:-admin}"
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-8080}"
 
-ARR_INSTALL_INDEXERS="${ARR_INSTALL_INDEXERS:-1}"
-ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv,limetorrents,torlock,therarbg,knaben,glodls,magnetdl}"
-# No default: the credentials are secrets, so the list is opt-in via arr.env.
-ARR_INDEXERS_PRIVATE="${ARR_INDEXERS_PRIVATE:-}"
 ARR_RUN_CONFIGARR="${ARR_RUN_CONFIGARR:-1}"
 ARR_CONFIGURE_SEERR="${ARR_CONFIGURE_SEERR:-1}"
 # Jellyfin as Seerr must reach it: the host LAN address, because Jellyfin is
@@ -92,7 +85,6 @@ SEERR_JELLYFIN_PORT="${SEERR_JELLYFIN_PORT:-8096}"
 SONARR_INTERNAL_URL="http://sonarr:8989"
 RADARR_INTERNAL_URL="http://radarr:7878"
 PROWLARR_INTERNAL_URL="http://prowlarr:9696"
-BYPARR_INTERNAL_URL="http://byparr:8191"
 QBITTORRENT_HOST="qbittorrent"
 
 for cmd in curl jq; do
@@ -456,238 +448,6 @@ add_application Sonarr Sonarr "$SONARR_INTERNAL_URL" "$SONARR_API_KEY" \
 add_application Radarr Radarr "$RADARR_INTERNAL_URL" "$RADARR_API_KEY" \
   '.fields += [{name: "syncCategories", value: [2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,2090]}]'
 
-# --- byparr indexer proxy ------------------------------------------------------
-
-say "Registering Byparr as Prowlarr's indexer proxy"
-# Prowlarr routes a request through the proxy only when it detects a Cloudflare
-# challenge AND the indexer shares a tag with the proxy — so tagging every
-# indexer costs nothing on unprotected trackers and future-proofs any that add
-# Cloudflare later. Byparr is registered under the FlareSolverr implementation:
-# it speaks that API. It is GET-only — Prowlarr's request.post degrades to a
-# GET — acceptable because the Cloudflare-protected trackers here search via GET.
-#
-# Non-fatal throughout, like the indexers: a solver that cannot be registered
-# must not abort the run before Configarr gets its turn.
-BYPARR_TAG_ID=""
-setup_byparr_proxy() {
-  local tags entry existing indexers id name rc=0
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] ensure tag 'byparr'; GET /api/v1/indexerproxy/schema, then POST the"
-    info "[dry-run] FlareSolverr implementation with host ${BYPARR_INTERNAL_URL}; tag every indexer"
-    return 0
-  fi
-
-  # Tag first: a proxy with no matching tagged indexer is dead weight and a
-  # Prowlarr health warning, so without the tag the whole section is skipped.
-  tags=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/tag) || {
-    warn "could not list Prowlarr's tags — skipping the Byparr proxy"
-    return 0
-  }
-  # Prowlarr lowercases tag labels on create, so match the stored form.
-  BYPARR_TAG_ID=$(printf '%s' "$tags" \
-    | jq -r 'map(select(.label == "byparr")) | first | .id // empty')
-  if [ -n "$BYPARR_TAG_ID" ]; then
-    info "tag 'byparr': exists (id ${BYPARR_TAG_ID})"
-  else
-    BYPARR_TAG_ID=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/tag \
-      '{"label":"byparr"}' | jq -r '.id // empty') || BYPARR_TAG_ID=""
-    if [ -z "$BYPARR_TAG_ID" ]; then
-      warn "could not create the 'byparr' tag — skipping the Byparr proxy"
-      return 0
-    fi
-    info "tag 'byparr': created (id ${BYPARR_TAG_ID})"
-  fi
-
-  existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexerproxy \
-    | jq -r '.[].name // empty') || existing=""
-  if printf '%s\n' "$existing" | grep -Fxq "Byparr"; then
-    info "proxy: exists, skipping"
-  else
-    # GET-schema-modify-POST, the same mandatory pattern as the indexers: the
-    # resource mapper rejects hand-written bodies.
-    entry=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexerproxy/schema \
-      | jq -c 'map(select(.implementation == "FlareSolverr")) | first // empty') || entry=""
-    if [ -z "$entry" ]; then
-      warn "no FlareSolverr implementation in the indexerproxy schema — skipping the proxy"
-    else
-      entry=$(printf '%s' "$entry" \
-        | jq -c --arg host "$BYPARR_INTERNAL_URL" --argjson tag "$BYPARR_TAG_ID" '
-            .name = "Byparr" | .tags = [$tag]
-            | .fields |= map(if .name == "host" then .value = $host else . end)')
-      # No forceSave on the first try: the create-path test is the only automatic
-      # reachability check the proxy gets. Only when it fails (byparr still
-      # starting, most likely) is it saved untested, retestable from the UI.
-      rc=0
-      api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/indexerproxy \
-        "$entry" >/dev/null || rc=$?
-      if [ "$rc" -ne 0 ]; then
-        warn "proxy connection test failed (details above) — saving untested"
-        rc=0
-        api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST '/api/v1/indexerproxy?forceSave=true' \
-          "$entry" >/dev/null || rc=$?
-      fi
-      if [ "$rc" -eq 0 ]; then
-        info "proxy: registered (host ${BYPARR_INTERNAL_URL}, tag 'byparr')"
-      else
-        warn "proxy could not be registered (exit ${rc})"
-      fi
-    fi
-  fi
-
-  # Retro-tag indexers from earlier runs (or added by hand), which predate the
-  # tag. New ones are born tagged in add_one below. GET-modify-PUT over the
-  # whole object — never a partial body — and forceSave because a tracker being
-  # down right now is not a reason to leave it untagged.
-  indexers=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexer) || {
-    warn "could not list indexers to retro-tag — new ones are still tagged on create"
-    return 0
-  }
-  printf '%s' "$indexers" \
-    | jq -c --argjson tag "$BYPARR_TAG_ID" '.[] | select((.tags // []) | index($tag) | not)' \
-    | while read -r entry; do
-        id=$(printf '%s' "$entry" | jq -r '.id')
-        name=$(printf '%s' "$entry" | jq -r '.name')
-        entry=$(printf '%s' "$entry" | jq -c --argjson tag "$BYPARR_TAG_ID" '.tags += [$tag]')
-        rc=0
-        api "$PROWLARR_URL" "$PROWLARR_API_KEY" PUT "/api/v1/indexer/${id}?forceSave=true" \
-          "$entry" >/dev/null || rc=$?
-        if [ "$rc" -eq 0 ]; then
-          info "${name}: tagged 'byparr'"
-        else
-          warn "${name}: could not be tagged (exit ${rc})"
-        fi
-      done
-  return 0
-}
-setup_byparr_proxy
-
-# --- indexers ----------------------------------------------------------------
-
-if [ "$ARR_INSTALL_INDEXERS" = "1" ]; then
-  say "Adding indexers to Prowlarr"
-  # Every call below is non-fatal on purpose: `api` returns 22 under `set -e`,
-  # and a tracker that is merely down or renamed must not abort the run before
-  # Configarr gets its turn. Each step captures its own rc and warns instead.
-  add_indexers() {
-    local schema existing def key user pass
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-      info "[dry-run] GET /api/v1/indexer/schema, then POST each of: ${ARR_INDEXERS}"
-      [ -n "$ARR_INDEXERS_PRIVATE" ] && info "[dry-run] plus, with credentials: ${ARR_INDEXERS_PRIVATE}"
-      return 0
-    fi
-
-    # GET-schema-modify-POST is mandatory here, not stylistic. Prowlarr's
-    # IndexerResource.ToModel() looks every non-standard field up in the cached
-    # Cardigann definition and throws ArgumentOutOfRangeException on anything it
-    # does not recognise, so a hand-written body is rejected outright.
-    schema=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexer/schema) || {
-      warn "could not fetch the indexer schema — skipping indexers"
-      return 0
-    }
-    existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/indexer \
-      | jq -r '.[].definitionName // empty') || existing=""
-
-    # add_one <definitionName> [<username> <password>]
-    add_one() {
-      local def="$1" user="${2:-}" pass="${3:-}" entry rc=0
-
-      if printf '%s\n' "$existing" | grep -Fxq "$def"; then
-        info "${def}: exists, skipping"
-        return 0
-      fi
-
-      entry=$(printf '%s' "$schema" \
-        | jq -c --arg d "$def" 'map(select(.definitionName == $d)) | first // empty')
-      if [ -z "$entry" ]; then
-        warn "${def}: not in Prowlarr's bundled definitions — skipping"
-        return 0
-      fi
-
-      # Born tagged for the Byparr proxy (see setup_byparr_proxy above). Empty
-      # when the proxy section was skipped, in which case the tag is left alone.
-      if [ -n "$BYPARR_TAG_ID" ]; then
-        entry=$(printf '%s' "$entry" | jq -c --argjson tag "$BYPARR_TAG_ID" '.tags = [$tag]')
-      fi
-
-      if [ -n "$user" ]; then
-        # A definition that authenticates some other way (cookie, passkey, 2FA)
-        # has no username/password fields; injecting into it would drop the
-        # credentials silently and save a dead indexer that looks configured.
-        if ! printf '%s' "$entry" | jq -e \
-            '[.fields[].name] | (index("username") != null and index("password") != null)' >/dev/null; then
-          warn "${def}: definition has no username/password fields — skipping."
-          warn "${def}: its fields are: $(printf '%s' "$entry" | jq -r '[.fields[].name] | join(", ")')"
-          return 0
-        fi
-        # Priority 10 vs the public 25: on otherwise-equal releases the apps
-        # break the tie toward the private copy.
-        entry=$(printf '%s' "$entry" | jq -c --arg u "$user" --arg p "$pass" '
-          .enable = true | .priority = 10
-          | .fields |= map(if   .name == "username" then .value = $u
-                           elif .name == "password" then .value = $p
-                           else . end)')
-
-        # No forceSave on the first try: the create-path test is the only
-        # automatic check these credentials will ever get. Only when it fails
-        # (site down, captcha, wrong password — the error above says which) is
-        # the indexer saved untested, so it can be retested from the UI.
-        rc=0
-        api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/indexer \
-          "$entry" >/dev/null || rc=$?
-        if [ "$rc" -eq 0 ]; then
-          info "${def}: added (credentials verified)"
-          return 0
-        fi
-        warn "${def}: connection test failed (details above) — saving untested"
-      else
-        entry=$(printf '%s' "$entry" | jq -c '.enable = true | .priority = 25')
-      fi
-
-      # forceSave: CreateProvider tests the indexer before saving and aborts on
-      # failure. A public tracker being unreachable right now is not a reason to
-      # leave it unconfigured — it can be tested from the UI later.
-      rc=0
-      api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST '/api/v1/indexer?forceSave=true' \
-        "$entry" >/dev/null || rc=$?
-      if [ "$rc" -ne 0 ]; then
-        warn "${def}: could not be added (exit ${rc})"
-        return 0
-      fi
-      info "${def}: added"
-      return 0
-    }
-
-    # %s\n, not %s: read consumes up to a newline and fails on EOF, so without a
-    # trailing one the last indexer in the list is assigned but never processed.
-    printf '%s\n' "$ARR_INDEXERS" | tr ',' '\n' | while read -r def; do
-      def="$(printf '%s' "$def" | tr -d '[:space:]')"
-      [ -z "$def" ] && continue
-      add_one "$def"
-    done
-
-    printf '%s\n' "$ARR_INDEXERS_PRIVATE" | tr ',' '\n' | while read -r def; do
-      def="$(printf '%s' "$def" | tr -d '[:space:]')"
-      [ -z "$def" ] && continue
-      # kinozal -> ARR_INDEXER_KINOZAL_USER / _PASS. tr -c leaves only A-Z0-9,
-      # so the eval'd name cannot carry anything but a variable name.
-      key=$(printf '%s' "$def" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')
-      user=$(eval "printf '%s' \"\${ARR_INDEXER_${key}_USER:-}\"")
-      pass=$(eval "printf '%s' \"\${ARR_INDEXER_${key}_PASS:-}\"")
-      if [ -z "$user" ] || [ -z "$pass" ]; then
-        warn "${def}: ARR_INDEXER_${key}_USER/_PASS not set in ${ENV_FILE} — skipping"
-        continue
-      fi
-      add_one "$def" "$user" "$pass"
-    done
-    return 0
-  }
-  add_indexers
-else
-  say "Skipping indexers (ARR_INSTALL_INDEXERS=0)"
-fi
-
 # --- configarr ----------------------------------------------------------------
 
 if [ "$ARR_RUN_CONFIGARR" = "1" ]; then
@@ -717,10 +477,10 @@ if [ "$ARR_RUN_CONFIGARR" = "1" ]; then
       return 0
     fi
 
-    # Non-fatal for the same reason as the indexers: this clones the TRaSH and
-    # Recyclarr template repos from GitHub, and a network hiccup must not fail
-    # the whole bring-up. Ofelia retries on its own schedule, so a miss here is
-    # temporary rather than a permanent gap.
+    # Non-fatal: this clones the TRaSH and Recyclarr template repos from
+    # GitHub, and a network hiccup must not fail the whole bring-up. Ofelia
+    # retries on its own schedule, so a miss here is temporary rather than a
+    # permanent gap.
     #
     # The container sets STOP_ON_ERROR and CONFIGARR_ENFORCE_CONFIG_VALIDATION,
     # because configarr otherwise exits 0 even when an instance fails — so a
@@ -744,8 +504,8 @@ fi
 
 # Deliberately after configarr: the Sonarr/Radarr wiring below picks the TRaSH
 # quality profiles configarr creates; run first it would bind requests to a
-# stock profile. Non-fatal throughout, like the indexers — a dead or not-yet-
-# built Jellyfin must not abort the arr bring-up. Nothing here is one-shot:
+# stock profile. Non-fatal throughout — a dead or not-yet-built Jellyfin must
+# not abort the arr bring-up. Nothing here is one-shot:
 # setup stays re-runnable until POST /settings/initialize, which is therefore
 # the last call, made only once everything before it succeeded.
 if [ "$ARR_CONFIGURE_SEERR" = "1" ]; then
@@ -943,8 +703,8 @@ info "Prowlarr:    ${PROWLARR_URL}"
 info "Seerr:       ${SEERR_URL}"
 cat <<'EOF'
 
-    Still manual: any private indexer not covered by ARR_INDEXERS_PRIVATE
-    (cookie/captcha/2FA logins cannot be scripted), and import the existing
-    library — Sonarr -> Series -> Import, Radarr -> Movies -> Import — which
-    reads what is already on the HDD.
+    Next: run ./arr-indexers.sh to add the trackers (Byparr proxy + indexers)
+    to Prowlarr. Still manual: import the existing library — Sonarr -> Series
+    -> Import, Radarr -> Movies -> Import — which reads what is already on
+    the HDD.
 EOF
