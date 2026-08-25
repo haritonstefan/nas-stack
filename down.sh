@@ -20,6 +20,14 @@
 #   ./down.sh --containers    # stop/remove containers only, keep all data
 #   ./down.sh --yes jellyfin  # scope to one stack
 #
+# Whenever the arr tier is in scope, qBittorrent's container and config dir
+# are kept by default — untouched, still running, still seeding — so this
+# destroy/recreate cycle can be run freely without losing active torrents or
+# the WebUI credentials Sonarr/Radarr rely on. Pass --wipe-qbittorrent to
+# also reset it, the old behavior.
+#
+#   ./down.sh --yes --wipe-qbittorrent   # also reset qBittorrent (loses seeding state)
+#
 # Default is a dry run on purpose: this is the one script in the repo where a
 # mistyped invocation costs real data.
 
@@ -29,13 +37,15 @@ cd "$(dirname "$0")"
 APPLY=0
 FORCE=0
 CONTAINERS_ONLY=0
+WIPE_QBITTORRENT=0
 STACKS=""
 
 for arg in "$@"; do
   case "$arg" in
-    --yes|-y)       APPLY=1 ;;
-    --force|-f)     FORCE=1 ;;
-    --containers)   CONTAINERS_ONLY=1 ;;
+    --yes|-y)             APPLY=1 ;;
+    --force|-f)           FORCE=1 ;;
+    --containers)         CONTAINERS_ONLY=1 ;;
+    --wipe-qbittorrent)   WIPE_QBITTORRENT=1 ;;
     core|jellyfin|arr) STACKS="${STACKS} ${arg}" ;;
     -h|--help)
       # Print the header block: every comment line after the shebang, stopping
@@ -45,11 +55,18 @@ for arg in "$@"; do
       exit 0 ;;
     *)
       echo "Unknown argument: ${arg}" >&2
-      echo "Usage: ./down.sh [--yes] [--force] [--containers] [core] [jellyfin] [arr]" >&2
+      echo "Usage: ./down.sh [--yes] [--force] [--containers] [--wipe-qbittorrent] [core] [jellyfin] [arr]" >&2
       exit 1 ;;
   esac
 done
 STACKS="${STACKS:- core jellyfin arr}"
+
+# Whenever arr is in scope and the caller hasn't opted into a full reset,
+# qBittorrent's container and config are spared throughout this script.
+KEEP_QBITTORRENT=0
+case " $STACKS " in
+  *" arr "*) [ "$WIPE_QBITTORRENT" -eq 0 ] && KEEP_QBITTORRENT=1 ;;
+esac
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 info() { printf '    %s\n' "$1"; }
@@ -100,7 +117,11 @@ case " $STACKS " in
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${SONARR_CONFIG_DIR:-${SAFE_ROOT}/sonarr/config}")"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${RADARR_CONFIG_DIR:-${SAFE_ROOT}/radarr/config}")"
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${PROWLARR_CONFIG_DIR:-${SAFE_ROOT}/prowlarr/config}")"
-    DELETE_PATHS="${DELETE_PATHS} $(dirname "${QBITTORRENT_CONFIG_DIR:-${SAFE_ROOT}/qbittorrent/config}")"
+    # Kept by default (see KEEP_QBITTORRENT) — a still-seeding torrent's state
+    # is not a config reset. --wipe-qbittorrent opts back into deleting it.
+    if [ "$WIPE_QBITTORRENT" -eq 1 ]; then
+      DELETE_PATHS="${DELETE_PATHS} $(dirname "${QBITTORRENT_CONFIG_DIR:-${SAFE_ROOT}/qbittorrent/config}")"
+    fi
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${SEERR_CONFIG_DIR:-${SAFE_ROOT}/seerr/config}")"
     # dirname covers both config/ and repos/ under /volume2/docker/configarr.
     DELETE_PATHS="${DELETE_PATHS} $(dirname "${CONFIGARR_CONFIG_DIR:-${SAFE_ROOT}/configarr/config}")"
@@ -138,6 +159,9 @@ say "Containers to stop and remove"
 for tier in core jellyfin arr; do
   case " $STACKS " in *" $tier "*) ;; *) continue ;; esac
   info "project nas-${tier} (docker-compose.${tier}.yml)"
+  if [ "$tier" = "arr" ] && [ "$KEEP_QBITTORRENT" -eq 1 ]; then
+    info "  — qbittorrent excluded, stays running (pass --wipe-qbittorrent to include it)"
+  fi
 done
 
 if [ "$CONTAINERS_ONLY" -eq 1 ]; then
@@ -167,6 +191,9 @@ else
       # Under SAFE_ROOT and therefore deletable, but excluded on purpose: config
       # comes back from this repo, a part-done download does not.
       info "${DOWNLOADS_DIR:-${SAFE_ROOT}/downloads} (downloads keep seeding; remove by hand)"
+      if [ "$KEEP_QBITTORRENT" -eq 1 ]; then
+        info "${QBITTORRENT_CONFIG_DIR:-${SAFE_ROOT}/qbittorrent/config} (kept running — pass --wipe-qbittorrent to reset it)"
+      fi
       ;;
   esac
 fi
@@ -200,6 +227,21 @@ fi
 for tier in arr jellyfin core; do
   case " $STACKS " in *" $tier "*) ;; *) continue ;; esac
   say "Stopping ${tier} stack"
+  if [ "$tier" = "arr" ] && [ "$KEEP_QBITTORRENT" -eq 1 ]; then
+    # Scope teardown to every arr service except qbittorrent, so its
+    # container is never stopped/removed and seeding is never interrupted.
+    ARR_KEEP_SERVICES="sonarr radarr prowlarr seerr byparr configarr ofelia"
+    if [ -f arr.env ]; then
+      # shellcheck disable=SC2086
+      run docker compose -p nas-arr --env-file arr.env \
+        -f docker-compose.arr.yml --profile configarr rm -f -s $ARR_KEEP_SERVICES
+    else
+      # shellcheck disable=SC2086
+      run docker compose -p nas-arr \
+        -f docker-compose.arr.yml --profile configarr rm -f -s $ARR_KEEP_SERVICES
+    fi
+    continue
+  fi
   # `down` ignores services behind a compose profile unless that profile is
   # enabled, so the arr tier names its own or the configarr container survives.
   TIER_PROFILES=""
@@ -219,6 +261,10 @@ done
 # name and is missed by the calls above; clean up by name as a backstop.
 say "Removing any stray containers by name"
 for c in homepage jellyfin sonarr radarr prowlarr qbittorrent seerr byparr configarr ofelia; do
+  if [ "$c" = "qbittorrent" ] && [ "$KEEP_QBITTORRENT" -eq 1 ]; then
+    info "qbittorrent kept (pass --wipe-qbittorrent to remove)"
+    continue
+  fi
   if docker ps -aq -f "name=^${c}$" | grep -q .; then
     run docker rm -f "$c" >/dev/null
     info "removed ${c}"
@@ -228,9 +274,14 @@ for c in homepage jellyfin sonarr radarr prowlarr qbittorrent seerr byparr confi
 done
 
 if docker network ls -q -f "name=^nas-net$" | grep -q .; then
-  say "Removing nas-net"
-  run docker network rm nas-net >/dev/null 2>&1 || \
-    warn "could not remove nas-net (still in use by another container?)"
+  if [ "$KEEP_QBITTORRENT" -eq 1 ]; then
+    say "Keeping nas-net"
+    info "qbittorrent is still attached — pass --wipe-qbittorrent for a full reset"
+  else
+    say "Removing nas-net"
+    run docker network rm nas-net >/dev/null 2>&1 || \
+      warn "could not remove nas-net (still in use by another container?)"
+  fi
 fi
 
 # --- delete data -------------------------------------------------------------
