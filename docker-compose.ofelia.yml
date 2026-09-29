@@ -1,0 +1,35 @@
+services:
+  # Starts the configarr container on a schedule. Configarr has no built-in
+  # scheduler and upstream will not add one, so the cadence lives here.
+  #
+  # Needs the docker socket, which is root-equivalent host access — the second
+  # unit here to get it, after Homepage. Identity is set the same way:
+  # a primary GID matching the socket's group, which survives a privilege drop
+  # and needs no DAC_OVERRIDE. :ro restricts nothing about the API.
+  #
+  # job-run only *starts* an existing container by name — it never creates
+  # one. up.sh/down.sh must ensure the configarr container exists (created,
+  # not started) as a side effect of dispatching this unit.
+  ofelia:
+    image: mcuadros/ofelia:0.3.22
+    container_name: ofelia
+    restart: unless-stopped
+    user: "${PUID:-1000}:${DOCKER_GID:-121}"
+    command: daemon --config=/etc/ofelia/config.ini
+    environment:
+      TZ: ${TZ:-Europe/Bucharest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${OFELIA_CONFIG_DIR:-/volume2/docker/ofelia/config}/ofelia.ini:/etc/ofelia/config.ini:ro
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

@@ -4,23 +4,29 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# UNITS_ALL, ARR_UNITS, is_unit(), add_unit(), want() — shared with down.sh
+# and configure.sh so the unit list has one source of truth.
+. ./lib-units.sh
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Brings the whole NAS stack up from a fresh clone:
   git clone ... && cd nas-stack && sudo ./up.sh
 
-Creates .env files from the examples, creates host directories with the right
-ownership, starts core (Homepage on :80, which creates nas-net), starts
-Jellyfin (host networking), then configures it over its API via
-jellyfin-bootstrap.sh. Starts the arr stack (Sonarr/Radarr/Prowlarr/
-qBittorrent/Seerr) and configures it via arr-bootstrap.sh. The trackers (the
-Byparr proxy and the Prowlarr indexers) are not added here — run
-./arr-indexers.sh afterwards.
+Every service is its own compose project (docker-compose.<unit>.yml), joined
+by nas-net (created here, before anything else) and a shared identity/host-
+facts file (shared.env). Creates .env files from the examples, creates host
+directories with the right ownership, starts homepage, then jellyfin (host
+networking) and configures it over its API via jellyfin-bootstrap.sh, then
+the arr units (sonarr/radarr/prowlarr/qbittorrent/seerr/byparr/configarr/
+ofelia) and configures them via arr-bootstrap.sh then seerr-bootstrap.sh. The
+trackers (the Byparr proxy and the Prowlarr indexers) are not added here —
+run ./arr-indexers.sh afterwards.
 
-Generates the arr API keys and the qBittorrent password into arr.env on first
-run, and never regenerates them.
+Generates each arr unit's own API key and seeds qBittorrent's WebUI password
+hash on first run, and never regenerates them.
 
-Idempotent — existing .env files are never overwritten, already-running stacks
+Idempotent — existing .env files are never overwritten, already-running units
 are reconciled rather than recreated, and the bootstraps skip what is already
 configured.
 
@@ -28,35 +34,41 @@ Optional: run ./configure.sh first for a guided setup of the .env files.
 
   sudo ./up.sh                  # everything
   ./up.sh --dry-run             # print what would happen, change nothing
-  sudo ./up.sh core             # only the core stack
-  sudo ./up.sh jellyfin         # only the jellyfin stack (+ bootstrap)
-  sudo ./up.sh arr              # only the arr stack (+ bootstrap)
-  sudo ./up.sh --no-bootstrap   # bring stacks up, skip all API config
+  sudo ./up.sh core             # alias for: homepage
+  sudo ./up.sh jellyfin         # only jellyfin (+ bootstrap)
+  sudo ./up.sh arr              # alias for: ${ARR_UNITS}
+  sudo ./up.sh radarr           # just one unit, e.g. to recreate it alone
+  sudo ./up.sh --no-bootstrap   # bring units up, skip all API config
   sudo ./up.sh --verbose        # log every API request and response
+
+Addressable units: ${UNITS_ALL}
 EOF
 }
 
 DRY_RUN=0
 RUN_BOOTSTRAP=1
 VERBOSE=0
-STACKS=""
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run)      DRY_RUN=1 ;;
     --no-bootstrap) RUN_BOOTSTRAP=0 ;;
     -v|--verbose)   VERBOSE=1 ;;
-    core|jellyfin|arr) STACKS="${STACKS} ${arg}" ;;
     -h|--help)      usage; exit 0 ;;
+    core)           add_unit homepage ;;
+    arr)            for u in $ARR_UNITS; do add_unit "$u"; done ;;
     *)
-      echo "Unknown argument: ${arg}" >&2
-      echo "Usage: ./up.sh [--dry-run] [--verbose] [--no-bootstrap] [core] [jellyfin] [arr]" >&2
-      exit 1 ;;
+      if is_unit "$arg"; then
+        add_unit "$arg"
+      else
+        echo "Unknown argument: ${arg}" >&2
+        echo "Usage: ./up.sh [--dry-run] [--verbose] [--no-bootstrap] [core|arr|<unit>...]" >&2
+        echo "Units: ${UNITS_ALL}" >&2
+        exit 1
+      fi ;;
   esac
 done
-STACKS="${STACKS:- core jellyfin arr}"
-
-want() { case " $STACKS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+UNITS="${UNITS:-$UNITS_ALL}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 info() { printf '    %s\n' "$1"; }
@@ -106,35 +118,56 @@ repo_own() {
   run chown "${SUDO_UID}:${SUDO_GID:-$SUDO_UID}" "$1"
 }
 
+# --- nas-net -------------------------------------------------------------------
+
+# Owned by no compose file — every unit's compose file declares it as
+# external: true. Created here, unconditionally, before anything else: every
+# unit needs it. Idempotent via `network inspect` first.
+say "Ensuring nas-net exists"
+if docker network inspect nas-net >/dev/null 2>&1; then
+  info "nas-net exists"
+else
+  run docker network create nas-net >/dev/null
+  info "nas-net $([ "$DRY_RUN" -eq 1 ] && echo 'would be created' || echo created)"
+fi
+
 # --- env files ---------------------------------------------------------------
 
 say "Preparing .env files"
-for tier in core jellyfin arr; do
-  want "$tier" || continue
-  if [ -f "${tier}.env" ]; then
-    info "${tier}.env exists, leaving untouched"
+# shared.env always, regardless of which units are selected — every unit's
+# compose invocation passes it first via --env-file.
+if [ -f shared.env ]; then
+  info "shared.env exists, leaving untouched"
+else
+  run cp shared.env.example shared.env
+  repo_own shared.env
+  info "shared.env created from example — run ./configure.sh to customize, or edit by hand"
+fi
+for unit in $UNITS_ALL; do
+  want "$unit" || continue
+  [ -f "${unit}.env.example" ] || continue
+  if [ -f "${unit}.env" ]; then
+    info "${unit}.env exists, leaving untouched"
   else
-    run cp "${tier}.env.example" "${tier}.env"
-    repo_own "${tier}.env"
-    info "${tier}.env created from example — run ./configure.sh to customize, or edit by hand"
+    run cp "${unit}.env.example" "${unit}.env"
+    repo_own "${unit}.env"
+    info "${unit}.env created from example — run ./configure.sh to customize, or edit by hand"
   fi
 done
 
-# Load values so directory paths below match what compose will use. Scoped to
-# the selected stacks: jellyfin.env also carries PUID/PGID, which would
-# otherwise override core.env's on a core-only run.
-if want core && [ -f core.env ]; then
+# Load values so directory paths below match what compose will use. shared.env
+# first, then each selected unit's own file, so a unit-specific name always
+# wins over a same-named shared default (there should be none, but sourcing
+# order matters if there ever is).
+if [ -f shared.env ]; then
   # shellcheck disable=SC1091
-  set -a; . ./core.env; set +a
+  set -a; . ./shared.env; set +a
 fi
-if want jellyfin && [ -f jellyfin.env ]; then
-  # shellcheck disable=SC1091
-  set -a; . ./jellyfin.env; set +a
-fi
-if want arr && [ -f arr.env ]; then
-  # shellcheck disable=SC1091
-  set -a; . ./arr.env; set +a
-fi
+for unit in $UNITS_ALL; do
+  want "$unit" || continue
+  # shellcheck disable=SC1090,SC1091
+  [ -f "${unit}.env" ] && { set -a; . "./${unit}.env"; set +a; }
+done
 
 PUID="${PUID:-1000}"
 PGID="${PGID:-10}"
@@ -157,7 +190,7 @@ make_dir() {
   return 0
 }
 
-if want core; then
+if want homepage; then
   make_dir "${HOMEPAGE_CONFIG_DIR:-/volume2/docker/homepage/config}"
   # docker.yaml: tiles render from labels without it, but container stats and
   # status only resolve once it declares the socket.
@@ -214,148 +247,208 @@ if want jellyfin; then
   fi
 fi
 
-if want arr; then
+if want sonarr; then
   make_dir "${SONARR_CONFIG_DIR:-/volume2/docker/sonarr/config}"
+  # Media dir is a pre-existing library — never created or chowned here, only
+  # checked. A chown across a live 14 TB library is not something a bring-up
+  # script should ever do. Read-write, unlike Jellyfin's read-only mounts, so
+  # writability is what matters.
+  d="${ARR_SERIES_DIR:-/volume1/Media/Series}"
+  if [ ! -d "$d" ]; then
+    warn "${d} does not exist — the Sonarr root folder for it will fail to add"
+  elif [ ! -w "$d" ]; then
+    warn "${d} is not writable — imports will fail"
+    warn "expected owner ${PUID}:${PGID}; check: ls -ldn ${d}"
+  else
+    info "${d} present and writable"
+  fi
+fi
+
+if want radarr; then
   make_dir "${RADARR_CONFIG_DIR:-/volume2/docker/radarr/config}"
+  d="${ARR_MOVIES_DIR:-/volume1/Media/Movies}"
+  if [ ! -d "$d" ]; then
+    warn "${d} does not exist — the Radarr root folder for it will fail to add"
+  elif [ ! -w "$d" ]; then
+    warn "${d} is not writable — imports will fail"
+    warn "expected owner ${PUID}:${PGID}; check: ls -ldn ${d}"
+  else
+    info "${d} present and writable"
+  fi
+fi
+
+if want prowlarr; then
   make_dir "${PROWLARR_CONFIG_DIR:-/volume2/docker/prowlarr/config}"
+fi
+
+if want qbittorrent; then
   make_dir "${QBITTORRENT_CONFIG_DIR:-/volume2/docker/qbittorrent/config}"
-  # Seerr runs as `user: PUID:PGID` (not an LSIO image), so the chown here is
-  # what makes /app/config writable for it.
+fi
+
+if want seerr; then
+  # Seerr runs as `user: PUID:PGID` (not an LSIO image), so this chown is what
+  # makes /app/config writable for it.
   make_dir "${SEERR_CONFIG_DIR:-/volume2/docker/seerr/config}"
+fi
+
+if want configarr; then
   make_dir "${CONFIGARR_CONFIG_DIR:-/volume2/docker/configarr/config}"
   # Cached clones of the TRaSH and Recyclarr template repos, a few hundred MB.
   make_dir "${CONFIGARR_REPOS_DIR:-/volume2/docker/configarr/repos}"
-  make_dir "${OFELIA_CONFIG_DIR:-/volume2/docker/ofelia/config}"
-
   # config.yml: the quality profiles and custom formats to apply. Needs no
   # token substitution — the API keys reach configarr as environment variables
-  # and !env resolves them at run time.
-  # ofelia.ini: the sync schedule, in its own directory so it cannot be mistaken
-  # for a configarr config file.
-  # Both copied only when absent, so edits made on the NAS survive re-runs.
+  # and !env resolves them at run time. Installed only when absent, so edits
+  # made on the NAS survive re-runs.
   CFGARR_CONFIG="${CONFIGARR_CONFIG_DIR:-/volume2/docker/configarr/config}"
-  OFELIA_CONFIG="${OFELIA_CONFIG_DIR:-/volume2/docker/ofelia/config}"
-  for spec in "config.yml:${CFGARR_CONFIG}" "ofelia.ini:${OFELIA_CONFIG}"; do
-    ca_file="${spec%%:*}"
-    ca_dest="${spec#*:}"
-    if [ -f "${ca_dest}/${ca_file}" ]; then
-      info "${ca_file} exists, leaving untouched"
-    else
-      run cp "configarr-config/${ca_file}" "${ca_dest}/${ca_file}"
-      [ "$IS_ROOT" -eq 1 ] && run chown "${PUID}:${PGID}" "${ca_dest}/${ca_file}"
-      info "${ca_file} $([ "$DRY_RUN" -eq 1 ] && echo 'would be installed' || echo installed)"
-    fi
-  done
+  if [ -f "${CFGARR_CONFIG}/config.yml" ]; then
+    info "config.yml exists, leaving untouched"
+  else
+    run cp "configarr-config/config.yml" "${CFGARR_CONFIG}/config.yml"
+    [ "$IS_ROOT" -eq 1 ] && run chown "${PUID}:${PGID}" "${CFGARR_CONFIG}/config.yml"
+    info "config.yml $([ "$DRY_RUN" -eq 1 ] && echo 'would be installed' || echo installed)"
+  fi
+fi
 
-  # Downloads live on the SSD and seed from there, so this tree is created and
-  # owned here. qBittorrent writes the subdirectories itself; these exist so the
-  # bind mount has a source with the right ownership from the start.
+if want ofelia; then
+  make_dir "${OFELIA_CONFIG_DIR:-/volume2/docker/ofelia/config}"
+  # ofelia.ini: the sync schedule, in its own directory so it cannot be
+  # mistaken for a configarr config file. Installed only when absent.
+  OFELIA_CONFIG="${OFELIA_CONFIG_DIR:-/volume2/docker/ofelia/config}"
+  if [ -f "${OFELIA_CONFIG}/ofelia.ini" ]; then
+    info "ofelia.ini exists, leaving untouched"
+  else
+    run cp "configarr-config/ofelia.ini" "${OFELIA_CONFIG}/ofelia.ini"
+    [ "$IS_ROOT" -eq 1 ] && run chown "${PUID}:${PGID}" "${OFELIA_CONFIG}/ofelia.ini"
+    info "ofelia.ini $([ "$DRY_RUN" -eq 1 ] && echo 'would be installed' || echo installed)"
+  fi
+fi
+
+# Downloads live on the SSD and seed from there, so this tree is created and
+# owned here. qBittorrent writes the subdirectories itself; these exist so the
+# bind mount has a source with the right ownership from the start. One value
+# (DOWNLOADS_DIR, shared.env) shared by sonarr, radarr and qbittorrent, so
+# this runs once if any of the three is selected — make_dir is idempotent.
+if want sonarr || want radarr || want qbittorrent; then
   ARR_DOWNLOADS="${DOWNLOADS_DIR:-/volume2/docker/downloads}"
   make_dir "$ARR_DOWNLOADS"
   make_dir "${ARR_DOWNLOADS}/incomplete"
   make_dir "${ARR_DOWNLOADS}/complete"
-
-  # Media dirs are pre-existing libraries — never created or chowned here, only
-  # checked. make_dir chowns, and a chown across a live 14 TB library is not
-  # something a bring-up script should ever do. Unlike Jellyfin's read-only
-  # mounts these are read-write, so writability is what matters.
-  for d in "${ARR_MOVIES_DIR:-/volume1/Media/Movies}" \
-           "${ARR_SERIES_DIR:-/volume1/Media/Series}"; do
-    if [ ! -d "$d" ]; then
-      warn "${d} does not exist — the arr root folder for it will fail to add"
-    elif [ ! -w "$d" ]; then
-      warn "${d} is not writable — imports will fail"
-      warn "expected owner ${PUID}:${PGID}; check: ls -ldn ${d}"
-    else
-      info "${d} present and writable"
-    fi
-  done
 fi
 
-# --- jellyfin admin password -------------------------------------------------
+# --- shared admin identity ----------------------------------------------------
 
-# Resolved BEFORE anything starts. Jellyfin's setup wizard is one-shot: aborting
-# here after the container is up would leave a reachable server with an open
-# wizard and no admin user, which is exactly the state that cannot be retried
-# without wiping /config.
+# Resolved BEFORE anything starts. Jellyfin's setup wizard is one-shot:
+# aborting after the container is up would leave a reachable server with an
+# open wizard and no admin user, which is exactly the state that cannot be
+# retried without wiping /config. qBittorrent needs the same password to seed
+# its WebUI hash before first start, so this is shared between both, not a
+# Jellyfin-only prompt.
 NEED_PASSWORD_PROMPT=0
-if want jellyfin && [ "$RUN_BOOTSTRAP" -eq 1 ] && [ -z "${JELLYFIN_ADMIN_PASSWORD:-}" ]; then
-  NEED_PASSWORD_PROMPT=1
+if { want jellyfin && [ "$RUN_BOOTSTRAP" -eq 1 ]; } || want qbittorrent; then
+  [ -z "${ADMIN_PASSWORD:-}" ] && NEED_PASSWORD_PROMPT=1
 fi
 
 if [ "$NEED_PASSWORD_PROMPT" -eq 1 ]; then
-  say "Jellyfin admin password"
+  say "Admin password (Jellyfin + qBittorrent WebUI)"
   if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] would prompt for JELLYFIN_ADMIN_PASSWORD"
+    info "[dry-run] would prompt for ADMIN_PASSWORD"
   elif [ -t 0 ]; then
     while :; do
-      printf '    Password for user "%s": ' "${JELLYFIN_ADMIN_USER:-admin}"
-      read -rs JELLYFIN_ADMIN_PASSWORD; printf '\n'
-      if [ -z "$JELLYFIN_ADMIN_PASSWORD" ]; then
+      printf '    Password for user "%s": ' "${ADMIN_USER:-admin}"
+      read -rs ADMIN_PASSWORD; printf '\n'
+      if [ -z "$ADMIN_PASSWORD" ]; then
         warn "password cannot be empty"
         continue
       fi
-      # Confirmed twice: a typo here is only discovered after the wizard has
-      # already closed around it, and recovering means wiping /config.
+      # Confirmed twice: a typo here is only discovered after Jellyfin's
+      # one-shot wizard has already closed around it, and recovering means
+      # wiping /config.
       printf '    Confirm: '
       read -rs CONFIRM_PASSWORD; printf '\n'
-      [ "$JELLYFIN_ADMIN_PASSWORD" = "$CONFIRM_PASSWORD" ] && break
+      [ "$ADMIN_PASSWORD" = "$CONFIRM_PASSWORD" ] && break
       warn "passwords did not match, try again"
     done
     unset CONFIRM_PASSWORD
 
-    # Single-quoted on write: jellyfin.env is shell-sourced by this script and
-    # by jellyfin-bootstrap.sh, so a space, # or $ in the password must not be
-    # interpreted. Embedded single quotes close-escape-reopen.
-    ESCAPED_PASSWORD=$(printf "%s" "$JELLYFIN_ADMIN_PASSWORD" | sed "s/'/'\\\\''/g")
-    grep -v '^JELLYFIN_ADMIN_PASSWORD=' jellyfin.env > jellyfin.env.tmp
-    printf "JELLYFIN_ADMIN_PASSWORD='%s'\n" "$ESCAPED_PASSWORD" >> jellyfin.env.tmp
-    cat jellyfin.env.tmp > jellyfin.env   # keeps the original owner and mode
-    rm -f jellyfin.env.tmp
-    chmod 600 jellyfin.env
-    repo_own jellyfin.env
-    info "saved to jellyfin.env (chmod 600)"
+    # Single-quoted on write: shared.env is shell-sourced by this script and by
+    # every bootstrap, and dotenv-parsed by docker compose (docker-compose.
+    # qbittorrent.yml reads it directly), so a space, # or $ in the password
+    # must not be interpreted. Embedded single quotes close-escape-reopen.
+    ESCAPED_PASSWORD=$(printf "%s" "$ADMIN_PASSWORD" | sed "s/'/'\\\\''/g")
+    grep -v '^ADMIN_PASSWORD=' shared.env > shared.env.tmp
+    printf "ADMIN_PASSWORD='%s'\n" "$ESCAPED_PASSWORD" >> shared.env.tmp
+    cat shared.env.tmp > shared.env   # keeps the original owner and mode
+    rm -f shared.env.tmp
+    chmod 600 shared.env
+    repo_own shared.env
+    export ADMIN_PASSWORD
+    info "saved to shared.env (chmod 600)"
   else
-    echo "ERROR: JELLYFIN_ADMIN_PASSWORD is unset and there is no TTY to" >&2
-    echo "       prompt on. Set it in jellyfin.env (or run ./configure.sh on" >&2
-    echo "       a terminal first) and re-run." >&2
+    echo "ERROR: ADMIN_PASSWORD is unset and there is no TTY to prompt on." >&2
+    echo "       Set it in shared.env (or run ./configure.sh on a terminal" >&2
+    echo "       first) and re-run." >&2
     exit 1
   fi
 fi
 
-# --- arr secrets -------------------------------------------------------------
+# --- per-unit secrets ---------------------------------------------------------
 
-# Written to arr.env BEFORE the stack starts, because the apps read their API key
-# from the environment at every start and never persist it. Generated once and
-# never regenerated: rotating a key silently breaks Prowlarr's app sync,
-# Configarr and all three Homepage widgets at once.
-if want arr && [ -f arr.env ]; then
-  say "arr secrets"
+# set_env_var <file> <name> <value> — replace-or-append, single-quoted.
+# These files are shell-sourced by this script and the bootstraps, and
+# dotenv-parsed by docker compose, so a generated value containing a shell
+# metacharacter must not be interpreted. Embedded single quotes close-escape-
+# reopen.
+set_env_var() {
+  local file="$1" name="$2" value="$3" escaped
+  escaped=$(printf "%s" "$value" | sed "s/'/'\\\\''/g")
+  grep -v "^${name}=" "$file" > "${file}.tmp"
+  printf "%s='%s'\n" "$name" "$escaped" >> "${file}.tmp"
+  cat "${file}.tmp" > "$file"   # keeps the original owner and mode
+  rm -f "${file}.tmp"
+}
 
-  # set_env_var <file> <name> <value> — replace-or-append, single-quoted.
-  # arr.env is shell-sourced by this script, by compose and by arr-bootstrap.sh,
-  # so a generated value containing a shell metacharacter must not be
-  # interpreted. Embedded single quotes close-escape-reopen.
-  set_env_var() {
-    local file="$1" name="$2" value="$3" escaped
-    escaped=$(printf "%s" "$value" | sed "s/'/'\\\\''/g")
-    grep -v "^${name}=" "$file" > "${file}.tmp"
-    printf "%s='%s'\n" "$name" "$escaped" >> "${file}.tmp"
-    cat "${file}.tmp" > "$file"   # keeps the original owner and mode
-    rm -f "${file}.tmp"
-  }
+# 32 lowercase hex chars, matching the format these apps generate themselves.
+gen_api_key() { od -vAn -N16 -tx1 /dev/urandom | tr -d ' \n'; }
 
-  # 32 lowercase hex chars, matching the format these apps generate themselves.
-  gen_api_key() { od -vAn -N16 -tx1 /dev/urandom | tr -d ' \n'; }
-  # No shell metacharacters, so it survives the .conf and the compose label too.
-  gen_password() { od -vAn -N18 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-24; }
+# Written BEFORE each unit's stack starts, because the apps read their API key
+# from the environment at every start and never persist it. Generated once
+# per unit and never regenerated: rotating a key silently breaks Prowlarr's
+# sync, Configarr and the Homepage widget for that unit at once.
+gen_secret_into() { # gen_secret_into <unit> <var-name>
+  local unit="$1" name="$2" current new_value
+  want "$unit" || return 0
+  [ -f "${unit}.env" ] || return 0
+  eval "current=\${${name}:-}"
+  if [ -n "$current" ]; then
+    info "${name} already set, keeping it"
+    return 0
+  fi
+  # Generated even under --dry-run, unlike everything else here. Each compose
+  # file declares its key as ${VAR:?} so that a missing secret fails loudly,
+  # which means `docker compose config` — and therefore the dry run's own
+  # compose invocation — cannot even interpolate the file while it is empty.
+  # Writing a gitignored .env is not the kind of change --dry-run withholds.
+  new_value="$(gen_api_key)"
+  set_env_var "${unit}.env" "$name" "$new_value"
+  eval "export ${name}=\"\$new_value\""
+  repo_own "${unit}.env"
+  chmod 600 "${unit}.env"
+  info "${name} generated (${unit}.env)"
+}
 
+say "Per-unit secrets"
+gen_secret_into sonarr   SONARR_API_KEY
+gen_secret_into radarr   RADARR_API_KEY
+gen_secret_into prowlarr PROWLARR_API_KEY
+gen_secret_into seerr    SEERR_API_KEY
+
+if want qbittorrent; then
   # PBKDF2 in qBittorrent's stored format: SHA-512, 100000 iterations, 16-byte
   # salt, 64-byte key, base64(salt):base64(key). `openssl kdf` needs
   # OpenSSL >= 3.0 (the NAS ships 3.0.20; openssl is checked in the preflight).
   # hexpass/hexsalt sidestep kdfopt value parsing, and the password appearing
   # on openssl's argv for this one call is the same exposure already accepted
-  # by keeping it in plain text in arr.env.
+  # by keeping it in plain text in shared.env.
   gen_qbt_hash() {
     local pw="$1" pw_hex salt_b64 salt_hex key_b64
     salt_b64=$(openssl rand -base64 16 2>/dev/null) || salt_b64=""
@@ -370,54 +463,18 @@ if want arr && [ -f arr.env ]; then
     printf '%s:%s\n' "$salt_b64" "$key_b64"
   }
 
-  ARR_SECRETS_WRITTEN=0
-  for secret in SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY SEERR_API_KEY; do
-    eval "current=\${${secret}:-}"
-    if [ -n "$current" ]; then
-      info "${secret} already set, keeping it"
-      continue
-    fi
-    # Generated even under --dry-run, unlike everything else here. The compose
-    # file declares these as ${VAR:?} so that a missing secret fails loudly, which
-    # means `docker compose config` — and therefore the dry run's own compose
-    # invocation — cannot even interpolate the file while they are empty. Writing
-    # a gitignored .env is not the kind of change --dry-run exists to withhold.
-    new_value="$(gen_api_key)"
-    set_env_var arr.env "$secret" "$new_value"
-    eval "export ${secret}=\"\$new_value\""
-    ARR_SECRETS_WRITTEN=1
-    info "${secret} generated"
-  done
-
-  if [ -n "${QBITTORRENT_PASSWORD:-}" ]; then
-    info "QBITTORRENT_PASSWORD already set, keeping it"
-  else
-    # Generated in a dry run too, for the same reason as the keys above: the
-    # compose file will not interpolate at all while it is empty.
-    QBITTORRENT_PASSWORD="$(gen_password)"
-    set_env_var arr.env QBITTORRENT_PASSWORD "$QBITTORRENT_PASSWORD"
-    export QBITTORRENT_PASSWORD
-    ARR_SECRETS_WRITTEN=1
-    info "QBITTORRENT_PASSWORD generated"
-  fi
-
-  if [ "$ARR_SECRETS_WRITTEN" -eq 1 ]; then
-    chmod 600 arr.env
-    repo_own arr.env
-    info "arr.env updated (chmod 600) — back this file up, the keys live only here"
-  fi
-
-  # qBittorrent mints a new random WebUI password on every start unless one is
-  # already stored, which would invalidate the credentials Sonarr and Radarr hold
-  # on every restart. So the config is seeded before first start, with a PBKDF2
-  # hash of the password above. Copied only when absent, so on-NAS edits survive.
   QBT_CONFIG="${QBITTORRENT_CONFIG_DIR:-/volume2/docker/qbittorrent/config}"
   if [ -f "${QBT_CONFIG}/qBittorrent.conf" ]; then
     info "qBittorrent.conf exists, leaving untouched"
   elif [ "$DRY_RUN" -eq 1 ]; then
     info "[dry-run] would install qBittorrent.conf with a PBKDF2 password hash"
   else
-    QBT_HASH="$(gen_qbt_hash "$QBITTORRENT_PASSWORD")" || QBT_HASH=""
+    if [ -z "${ADMIN_PASSWORD:-}" ]; then
+      echo "ERROR: ADMIN_PASSWORD is unset — cannot seed qBittorrent.conf." >&2
+      echo "       Set it in shared.env (or run ./configure.sh) and re-run." >&2
+      exit 1
+    fi
+    QBT_HASH="$(gen_qbt_hash "$ADMIN_PASSWORD")" || QBT_HASH=""
     if [ -z "$QBT_HASH" ]; then
       echo "ERROR: could not generate the qBittorrent password hash." >&2
       echo "       'openssl kdf' failed — OpenSSL >= 3.0 is required (openssl version)." >&2
@@ -429,7 +486,7 @@ if want arr && [ -f arr.env ]; then
     QBT_TMP="${QBT_CONFIG}/qBittorrent.conf.tmp"
     sed -e "s|__PASSWORD_PBKDF2__|${QBT_HASH}|" \
         -e "s|__WEBUI_PORT__|${QBITTORRENT_PORT:-8080}|" \
-        -e "s|__WEBUI_USER__|${QBITTORRENT_USER:-admin}|" \
+        -e "s|__WEBUI_USER__|${ADMIN_USER:-admin}|" \
         -e "s|__SAVE_PATH__|/downloads/complete|" \
         -e "s|__TEMP_PATH__|/downloads/incomplete|" \
         -e "s|__SEED_RATIO__|${QBITTORRENT_SEED_RATIO:-2}|" \
@@ -450,33 +507,55 @@ if want arr && [ -f arr.env ]; then
   fi
 fi
 
-# --- stacks ------------------------------------------------------------------
+# --- units ---------------------------------------------------------------------
 
-compose_up() {
-  local tier="$1"
-  say "Starting ${tier} stack"
-  # -p per tier: without it every stack shares the directory-derived project
-  # name, and each `up` reports the other stack's containers as orphans.
-  run docker compose -p "nas-${tier}" --env-file "${tier}.env" \
-    -f "docker-compose.${tier}.yml" up -d
+# ofelia's job-run only *starts* an existing container by name — it never
+# creates one — so whenever ofelia is in scope the configarr container must
+# exist first, created but not started, even if configarr itself was not
+# explicitly selected. Requires sonarr.env/radarr.env to already carry real
+# keys, so this is skipped (not failed) if they are not there yet — the same
+# way a bring-up that never touched sonarr/radarr has nothing for configarr
+# to sync anyway.
+ensure_configarr_container() {
+  if [ ! -f sonarr.env ] || [ ! -f radarr.env ] || [ ! -f configarr.env ]; then
+    warn "skipping configarr container creation — sonarr.env/radarr.env/configarr.env not all present yet"
+    warn "(run sudo ./up.sh sonarr radarr configarr at least once first)"
+    return 0
+  fi
+  say "Ensuring the configarr container exists (scheduler target)"
+  run docker compose -p nas-configarr --env-file shared.env --env-file sonarr.env \
+    --env-file radarr.env --env-file configarr.env -f docker-compose.configarr.yml \
+    up -d --no-start configarr
 }
 
-# core first: it defines nas-net, which later bridged tiers join as external.
-if want core;     then compose_up core;     fi
-if want jellyfin; then compose_up jellyfin; fi
-if want arr;      then compose_up arr;      fi
+compose_up() {
+  local unit="$1"
+  say "Starting ${unit}"
+  # configarr is never brought up by a plain `up -d`: it sits behind a compose
+  # profile and must never race Sonarr/Radarr's own startup (see
+  # docker-compose.configarr.yml). Naming it here only ensures the container
+  # exists — the actual sync runs via `docker compose run --rm` (arr-
+  # bootstrap.sh) or ofelia starting it on schedule.
+  if [ "$unit" = "configarr" ]; then
+    ensure_configarr_container
+    return 0
+  fi
+  # -p per unit: without it every unit shares the directory-derived project
+  # name, and each `up` reports the other units' containers as orphans.
+  run docker compose -p "nas-${unit}" --env-file shared.env --env-file "${unit}.env" \
+    -f "docker-compose.${unit}.yml" up -d
+}
 
-if want arr; then
-  # configarr sits behind a compose profile, so the `up -d` above skips it. Ofelia
-  # can only start a container that already exists — it never creates one — so
-  # create it here, stopped. Naming the service enables its profile implicitly.
-  #
-  # Unconditional, and deliberately not gated on ARR_RUN_CONFIGARR: that flag
-  # decides whether the *first sync* runs now, not whether the schedule exists.
-  # The first sync happens in arr-bootstrap.sh, once Sonarr and Radarr answer.
-  say "Creating the configarr container for the scheduler"
-  run docker compose -p nas-arr --env-file arr.env \
-    -f docker-compose.arr.yml up -d --no-start configarr
+# homepage first: nas-net already exists (created above), but homepage is the
+# dashboard everything else shows up on, so bring it up first for parity with
+# the old core-first ordering.
+for unit in $UNITS_ALL; do
+  want "$unit" || continue
+  compose_up "$unit"
+done
+
+if want ofelia && ! want configarr; then
+  ensure_configarr_container
 fi
 
 # --- jellyfin bootstrap ------------------------------------------------------
@@ -486,7 +565,8 @@ if want jellyfin; then
     say "Skipping Jellyfin bootstrap (--no-bootstrap)"
   else
     say "Configuring Jellyfin"
-    export JELLYFIN_ADMIN_PASSWORD="${JELLYFIN_ADMIN_PASSWORD:-}"
+    export ADMIN_USER="${ADMIN_USER:-admin}"
+    export ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
     BOOTSTRAP_ARGS=""
     [ "$VERBOSE" -eq 1 ] && BOOTSTRAP_ARGS="--verbose"
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -555,11 +635,11 @@ fi
 
 # --- arr bootstrap -----------------------------------------------------------
 
-if want arr; then
+if want sonarr || want radarr || want prowlarr || want qbittorrent; then
   if [ "$RUN_BOOTSTRAP" -eq 0 ]; then
     say "Skipping arr bootstrap (--no-bootstrap)"
   else
-    say "Configuring the arr stack"
+    say "Configuring the arr units"
     ARR_BOOTSTRAP_ARGS=""
     [ "$VERBOSE" -eq 1 ] && ARR_BOOTSTRAP_ARGS="--verbose"
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -592,7 +672,7 @@ fi
 # is what used to happen when this was a warn-and-continue block inside
 # arr-bootstrap.sh. So: carry on, report it loudly in the summary, exit non-zero.
 SEERR_RC=0
-if want arr; then
+if want seerr; then
   if [ "$RUN_BOOTSTRAP" -eq 0 ]; then
     say "Skipping Seerr bootstrap (--no-bootstrap)"
   else
@@ -615,19 +695,29 @@ fi
 # --- summary -----------------------------------------------------------------
 
 say "Done"
-if want core; then
+if want homepage; then
   info "Homepage:          http://apollo.local/"
 fi
 if want jellyfin; then
   info "Jellyfin:          http://apollo.local:8096"
 fi
-if want arr; then
+if want sonarr; then
   info "Sonarr:            http://apollo.local:${SONARR_PORT:-8989}"
+fi
+if want radarr; then
   info "Radarr:            http://apollo.local:${RADARR_PORT:-7878}"
+fi
+if want prowlarr; then
   info "Prowlarr:          http://apollo.local:${PROWLARR_PORT:-9696}"
+fi
+if want qbittorrent; then
   info "qBittorrent:       http://apollo.local:${QBITTORRENT_PORT:-8080}"
-  info "qBittorrent login: ${QBITTORRENT_USER:-admin} / see QBITTORRENT_PASSWORD in arr.env"
+  info "qBittorrent login: ${ADMIN_USER:-admin} / see ADMIN_PASSWORD in shared.env"
+fi
+if want seerr; then
   info "Seerr:             http://apollo.local:${SEERR_PORT:-5055}"
+fi
+if want prowlarr; then
   info "Next: run ./arr-indexers.sh to add the trackers to Prowlarr"
 fi
 

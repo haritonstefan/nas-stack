@@ -3,7 +3,7 @@
 # proxy (registered under the FlareSolverr implementation — it speaks that
 # API), the public indexers from ARR_INDEXERS, and the private ones from
 # ARR_INDEXERS_PRIVATE with credentials from ARR_INDEXER_<NAME>_USER / _PASS
-# (<NAME> is the definition name uppercased) — see arr.env.example.
+# (<NAME> is the definition name uppercased) — see prowlarr.env.example.
 # Idempotent — safe to re-run.
 #
 # Run AFTER `sudo ./up.sh`: it only talks to Prowlarr and skips anything
@@ -29,8 +29,9 @@
 #   ./arr-indexers.sh --non-interactive   # never prompt; save failures untested
 #   PROWLARR_URL=http://apollo.local:9696 ./arr-indexers.sh
 #
-# Requires: curl, jq. Reads arr.env if present (for PROWLARR_API_KEY and the
-# indexer lists).
+# Requires: curl, jq. Reads prowlarr.env if present (for PROWLARR_API_KEY and
+# the indexer lists — all of it is Prowlarr's own, so no other unit's .env is
+# needed).
 #
 # Exit codes: 0 success — but individual trackers may still have warned and
 # been skipped, so read the output. 1 precondition failure. A per-indexer API
@@ -66,7 +67,7 @@ if [ "$NON_INTERACTIVE" -eq 0 ] && { : </dev/tty; } 2>/dev/null; then
   INTERACTIVE=1
 fi
 
-ENV_FILE="${ENV_FILE:-arr.env}"
+ENV_FILE="${ENV_FILE:-prowlarr.env}"
 if [ -f "$ENV_FILE" ]; then
   set -a
   # Prefixed with ./ only for a bare filename, so that a relative name is read
@@ -85,7 +86,7 @@ PROWLARR_URL="${PROWLARR_URL:-http://127.0.0.1:9696}"
 # leaving Prowlarr empty for hand-adding. The Byparr proxy is set up regardless.
 ARR_INSTALL_INDEXERS="${ARR_INSTALL_INDEXERS:-1}"
 ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv,limetorrents,torlock,therarbg,knaben,glodls,magnetdl}"
-# No default: the credentials are secrets, so the list is opt-in via arr.env.
+# No default: the credentials are secrets, so the list is opt-in via prowlarr.env.
 ARR_INDEXERS_PRIVATE="${ARR_INDEXERS_PRIVATE:-}"
 
 # The address Prowlarr uses for Byparr over nas-net — not how this script
@@ -160,17 +161,8 @@ api() {
   return 22
 }
 
-# Passwords travel inside `fields` arrays, so masking has to reach into them by
-# name rather than looking at top-level keys.
-mask() {
-  printf '%s' "$1" | jq -c '
-    if type == "object" then
-      (if has("fields") then
-         .fields |= map(if (.name // "" | test("password|apiKey"; "i")) then .value = "***" else . end)
-       else . end)
-      | (if has("password") then .password = "***" else . end)
-    else . end' 2>/dev/null || echo '<unprintable>'
-}
+# mask() and wait_for() — shared with arr-bootstrap.sh and seerr-bootstrap.sh.
+. ./lib-http.sh
 
 if [ "$DRY_RUN" -eq 1 ]; then
   say "DRY RUN — no requests will be sent"
@@ -179,35 +171,11 @@ fi
 # --- readiness ---------------------------------------------------------------
 
 say "Waiting for Prowlarr"
-wait_for_prowlarr() {
-  local i probe
-  if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] would wait for prowlarr at ${PROWLARR_URL}"
-    return 0
-  fi
-  for i in $(seq 1 90); do
-    # /ping is unauthenticated and only 200s once the app is genuinely serving.
-    # A TCP connect is not enough: it accepts connections well before it
-    # finishes migrating its database. The JSON shape is checked too, since a
-    # reverse proxy or a wrong port can 200 with something else entirely.
-    if probe=$(curl -fsS --max-time 5 "${PROWLARR_URL}/ping" 2>/dev/null) \
-       && printf '%s' "$probe" | jq -e '.status == "OK"' >/dev/null 2>&1; then
-      info "prowlarr ready at ${PROWLARR_URL}"
-      return 0
-    fi
-    if [ "$i" -eq 90 ]; then
-      echo "ERROR: prowlarr did not answer at ${PROWLARR_URL}/ping after 180s." >&2
-      echo "       Check: docker logs prowlarr" >&2
-      exit 1
-    fi
-    sleep 2
-  done
-}
-wait_for_prowlarr
+wait_for prowlarr "$PROWLARR_URL"
 
 # A 401 here means the pre-seeded key never reached the app — almost always a
-# stale container from before arr.env existed. Worth its own message, because
-# every later call would fail the same way with a less obvious cause.
+# stale container from before prowlarr.env existed. Worth its own message,
+# because every later call would fail the same way with a less obvious cause.
 if [ "$DRY_RUN" -eq 0 ]; then
   status=$(curl -sS -o /dev/null -w '%{http_code}' \
     -H "X-Api-Key: ${PROWLARR_API_KEY}" "${PROWLARR_URL}/api/v1/system/status" 2>/dev/null || echo 000)
@@ -217,7 +185,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
       echo "ERROR: prowlarr rejected the API key from ${ENV_FILE} (HTTP ${status})." >&2
       echo "       The key is injected at container start, so a container that" >&2
       echo "       predates the current ${ENV_FILE} still has the old one:" >&2
-      echo "         docker compose -p nas-arr --env-file ${ENV_FILE} -f docker-compose.arr.yml up -d --force-recreate prowlarr" >&2
+      echo "         docker compose -p nas-prowlarr --env-file shared.env --env-file ${ENV_FILE} -f docker-compose.prowlarr.yml up -d --force-recreate prowlarr" >&2
       exit 1 ;;
     *)
       warn "prowlarr: unexpected HTTP ${status} from its status endpoint" ;;

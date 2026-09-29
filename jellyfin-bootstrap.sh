@@ -12,7 +12,8 @@
 #   ./jellyfin-bootstrap.sh --dry-run
 #   JELLYFIN_URL=http://apollo.local:8096 ./jellyfin-bootstrap.sh
 #
-# Requires: curl, jq. Reads jellyfin.env if present (for JELLYFIN_ADMIN_*).
+# Requires: curl, jq. Reads shared.env (for ADMIN_USER/ADMIN_PASSWORD, the
+# identity also used by qBittorrent's WebUI) and jellyfin.env if present.
 
 set -euo pipefail
 
@@ -32,6 +33,9 @@ for arg in "$@"; do
   esac
 done
 
+# shellcheck disable=SC1091
+[ -f shared.env ] && { set -a; . ./shared.env; set +a; }
+
 ENV_FILE="${ENV_FILE:-jellyfin.env}"
 if [ -f "$ENV_FILE" ]; then
   set -a
@@ -42,7 +46,10 @@ fi
 
 JELLYFIN_URL="${JELLYFIN_URL:-http://apollo.local:8096}"
 JELLYFIN_SERVER_NAME="${JELLYFIN_SERVER_NAME:-Apollo}"
-JELLYFIN_ADMIN_USER="${JELLYFIN_ADMIN_USER:-admin}"
+# The shared identity (shared.env), not a Jellyfin-only credential — qBittorrent's
+# WebUI and Seerr's sign-in ride the same account.
+JELLYFIN_ADMIN_USER="${ADMIN_USER:-admin}"
+JELLYFIN_ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 JELLYFIN_METADATA_LANGUAGE="${JELLYFIN_METADATA_LANGUAGE:-en}"
 # Region for metadata providers: picks release dates and certification scheme
 # (US -> PG-13/R). Not a content filter — providers fall back to other regions
@@ -55,7 +62,8 @@ for cmd in curl jq; do
 done
 
 if [ "$DRY_RUN" -eq 0 ] && [ -z "${JELLYFIN_ADMIN_PASSWORD:-}" ]; then
-  echo "ERROR: JELLYFIN_ADMIN_PASSWORD is not set (put it in $ENV_FILE)." >&2
+  echo "ERROR: ADMIN_PASSWORD is not set (put it in shared.env, or run up.sh" >&2
+  echo "       which prompts for it)." >&2
   exit 1
 fi
 : "${JELLYFIN_ADMIN_PASSWORD:=<unset>}"
@@ -221,10 +229,10 @@ ERROR: could not authenticate as "${JELLYFIN_ADMIN_USER}".
   step is where a wrong assumption would first surface. Likely causes:
 
   1. The wizard was already completed by hand with different credentials.
-     Check JELLYFIN_ADMIN_USER / JELLYFIN_ADMIN_PASSWORD in ${ENV_FILE}.
+     Check ADMIN_USER / ADMIN_PASSWORD in shared.env.
   2. POST /Startup/User did not set the credentials as expected on this
      Jellyfin version. Reset and retry:
-       docker compose -p nas-jellyfin --env-file ${ENV_FILE} -f docker-compose.jellyfin.yml down
+       docker compose -p nas-jellyfin --env-file shared.env --env-file ${ENV_FILE} -f docker-compose.jellyfin.yml down
        rm -rf ${JELLYFIN_CONFIG_DIR:-/volume2/docker/jellyfin/config}/*
        sudo ./up.sh jellyfin
 

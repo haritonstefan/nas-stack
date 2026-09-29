@@ -35,3 +35,4 @@ services:
 networks:
   nas-net:
     name: nas-net
+    external: true

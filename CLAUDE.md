@@ -4,32 +4,69 @@
 
 Self-hosted service stacks for a UGreen NAS (UGOS, `apollo.local`), as Docker Compose files in git — so the whole setup is reproducible from a fresh clone with `sudo ./up.sh` and reversible with `./down.sh`.
 
-One standalone `docker-compose.<tier>.yml` per tier, no shared compose file, no runtime coupling between stacks beyond the `nas-net` network:
+One standalone `docker-compose.<unit>.yml` per **service**, not per tier — no
+shared compose file, no `depends_on`, no shared volumes between units. The
+only things units have in common are the `nas-net` network (created by
+`up.sh`/`down.sh`, not by any compose file) and `shared.env` (the vars
+genuinely reused by more than one unit: identity, host facts). `up.sh`/
+`down.sh` are the only place that knows how units relate to each other —
+compose files stay ignorant of one another. Ten units today:
 
-- **`core`** — `nas-net` and Homepage (dashboard on `:80`, the entrypoint to everything). Everything else depends on it; it depends on nothing.
+- **`homepage`** — the dashboard on `:80`, the entrypoint to everything.
 - **`jellyfin`** — built.
-- **`arr`** — sonarr/radarr/prowlarr/qbittorrent/seerr, plus byparr, configarr and ofelia. Built.
-- **`pihole`** — not yet built.
+- **`sonarr` / `radarr` / `prowlarr` / `qbittorrent` / `seerr` / `byparr` / `configarr` / `ofelia`** — the arr stack. Built.
+- (pihole — not yet built.)
 
-Bring-up order: `core` first, then consumer stacks in any order.
+`core` and `arr` still exist, but only as convenience aliases resolved by
+`up.sh`/`down.sh`/`configure.sh` themselves: `core` → `homepage`, `arr` → the
+8 units above. `./down.sh radarr && sudo ./up.sh radarr` tears down and
+recreates exactly one unit while it stays wired into the rest of the stack —
+same network, same shared identity, same API keys (each unit's own, in its
+own `<unit>.env`).
+
+Bring-up order: `nas-net` first (script-managed, not owned by any compose
+file), then any unit in any order — nothing has a hard dependency on another
+unit being up first, except two documented exceptions: the `configarr` unit's
+compose file needs `SONARR_API_KEY`/`RADARR_API_KEY` (passed as extra
+`--env-file` flags, not copied into `configarr.env`), and the `ofelia` unit's
+dispatch must ensure the `configarr` container exists (created, never
+started by a plain `up -d` — see `## Arr`) even when `configarr` wasn't
+itself selected.
 
 ### Files
 
-- `docker-compose.<tier>.yml` + `<tier>.env.example` — one self-contained pair per tier.
+- `shared.env.example` (→ `shared.env`, gitignored) — vars reused by more than
+  one unit: `TZ`, `PUID`, `PGID`, `UMASK`, `DOCKER_GID`, `LAN_HOST` (the
+  `192.168.0.231` fact), `DOWNLOADS_DIR`, and the shared `ADMIN_USER`/
+  `ADMIN_PASSWORD` identity (Jellyfin admin + qBittorrent WebUI login; Seerr
+  rides it too, via `/auth/jellyfin`, without a credential of its own). Every
+  `docker compose` invocation passes `--env-file shared.env` first, then the
+  unit's own — so a same-named var in the unit's file would win, but none
+  should ever duplicate a shared.env name.
+- `docker-compose.<unit>.yml` + `<unit>.env.example` — one self-contained pair
+  per unit, for each of the ten units listed above. A variable used by exactly
+  one unit lives only in that unit's own file (ports, config dirs,
+  `RENDER_GID`, indexer lists, seed-ratio settings, `ARR_MOVIES_DIR`/
+  `ARR_SERIES_DIR`, etc.) — this is the same "single-consumer stays local"
+  rule `shared.env` itself follows in reverse.
 - `up.sh` / `down.sh` / `arr-bootstrap.sh` / `seerr-bootstrap.sh` / `arr-indexers.sh` / `configure.sh` — the automation, all with `--help`.
   `jellyfin-bootstrap.sh` has no `--help`; don't repeat that gap in new scripts.
 - `seerr-bootstrap.sh` — Seerr's first-run setup (Jellyfin sign-in, libraries, Sonarr/Radarr
   wiring, then `initialize`). Called by `up.sh` **after** `arr-bootstrap.sh`, and re-runnable
   by hand. Unlike the section it replaced, it fails non-zero and prints the state it saw.
+  Reads `shared.env` (for the shared `ADMIN_USER`/`ADMIN_PASSWORD` identity — Seerr's admin
+  IS the Jellyfin admin account) plus `seerr.env`/`sonarr.env`/`radarr.env`; it no longer
+  reaches across a tier boundary into a Jellyfin-owned file.
 - `arr-indexers.sh` — adds the trackers to Prowlarr (the `byparr` tag, the Byparr proxy,
   the public and private indexers). Deliberately **not** called by `up.sh` — run it by
   hand after the bring-up. Idempotent and re-runnable, which matters because Prowlarr
   fetches its Cardigann definitions shortly after start, so a definition missing on the
   first run often appears on a later one.
-- `configure.sh` — optional interactive wizard that fills in the `.env` files before
-  `up.sh` (detects host facts, asks shared values once, stages + confirms per file).
-  It never touches the up.sh-generated secrets, and `up.sh` stays fully non-interactive
-  without it.
+- `configure.sh` — optional interactive wizard that fills in `shared.env` and every
+  selected unit's `.env` before `up.sh` (detects host facts, asks shared values once,
+  stages + confirms per file). Restructured around the same flat unit list as `up.sh`/
+  `down.sh` (`core`/`arr` are aliases here too). It never touches the up.sh-generated
+  secrets, and `up.sh` stays fully non-interactive without it.
 - `apollo-nas-stack-spec.md` — target state and the **reasoning** behind each constraint.
   Read it before proposing an architectural change.
 - `homepage-config/` — templates (`docker.yaml`, `services.yaml`, `bookmarks.yaml`,
@@ -70,7 +107,7 @@ Asking looks like this:
 
 ```
 Run this on the NAS and paste the output:
-  docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml config
+  docker compose -p nas-jellyfin --env-file shared.env --env-file jellyfin.env -f docker-compose.jellyfin.yml config
 ```
 
 ## Host facts
@@ -82,28 +119,46 @@ Run this on the NAS and paste the output:
 - Bind-mount sources are **not** auto-created with correct ownership — `up.sh` mkdir+chowns them, so run it as root.
 - Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`9696`/`8080` → Sonarr/Radarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr. `0.0.0.0:53` free → PiHole. UGOS on 9999.
 - Docker daemon API `1.54` — pin images to exact patch versions and check compatibility against this.
-- Compose files must not hardcode host paths — all via `.env` (gitignored; `<tier>.env.example` is the template).
+- Compose files must not hardcode host paths — all via `.env` (gitignored; `shared.env.example` / `<unit>.env.example` are the templates).
 
 ## Running
 
-`sudo ./up.sh` takes a fresh clone to running: env files, host dirs + ownership, generated arr secrets, core then jellyfin then arr, all three bootstraps (jellyfin, arr, then seerr), restart. Idempotent. `./down.sh` reverses it. Both have `--help`. A Seerr bootstrap failure does not roll anything back but does make `up.sh` exit non-zero, with a banner in the summary.
+`sudo ./up.sh` takes a fresh clone to running: `nas-net`, env files, host dirs + ownership,
+generated per-unit arr secrets, homepage then jellyfin then the arr units, all three
+bootstraps (jellyfin, arr, then seerr), restart. Idempotent. `./down.sh` reverses it. Both
+have `--help`. A Seerr bootstrap failure does not roll anything back but does make `up.sh`
+exit non-zero, with a banner in the summary.
 
-Underneath it's plain compose. Compose does **not** read `<tier>.env` on its own, and all tiers share one directory — so `--env-file` and `-p nas-<tier>` are required on every call, or the stacks collapse into one project and report each other as orphans:
+Underneath it's plain compose. Compose does **not** read `.env` files on its own, and every
+unit shares one directory — so `--env-file` (shared.env first, then the unit's own) and
+`-p nas-<unit>` are required on every call, or the units collapse into one project and
+report each other as orphans:
 
 ```
-docker compose -p nas-core --env-file core.env -f docker-compose.core.yml up -d   # creates nas-net
-docker compose -p nas-jellyfin --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
-docker compose -p nas-arr --env-file arr.env -f docker-compose.arr.yml up -d
+docker network create nas-net   # up.sh, idempotent — no compose file owns this anymore
+docker compose -p nas-homepage --env-file shared.env --env-file homepage.env -f docker-compose.homepage.yml up -d
+docker compose -p nas-jellyfin --env-file shared.env --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
+docker compose -p nas-radarr   --env-file shared.env --env-file radarr.env   -f docker-compose.radarr.yml   up -d
 ```
 
-`down.sh` invariant to preserve: **nothing outside `/volume2/docker` can be deleted** — delete targets come from a sourced `.env`, so every path is validated against that root and rejected if it escapes, contains `..`, or is the root itself. `.env` files survive teardown (so no re-prompt for the Jellyfin password, and the arr API keys are not lost). The download tree survives too, though it is inside the root — see `## Arr`. Stacks come down **arr-first, core-last**, since core owns `nas-net` and arr joins it as external.
+`configarr` is the one unit that takes four `--env-file` flags (`shared.env`, `sonarr.env`,
+`radarr.env`, `configarr.env`) instead of two — its compose file needs `SONARR_API_KEY`/
+`RADARR_API_KEY`, which live in sonarr's/radarr's own files, not a second copy in
+`configarr.env` (a rotated key would go stale in a copy nobody remembers to update). It is
+also the one unit `up.sh`/`down.sh` never bring up with a plain `up -d`: always
+`up -d --no-start configarr`, because a compose profile (`profiles: [configarr]`) keeps it
+out of any generic dispatch, and starting it outright would race Sonarr/Radarr's own
+startup. `ofelia`'s dispatch ensures that `configarr` container exists the same way, even
+when `configarr` itself wasn't named — see `## Arr`.
+
+`down.sh` invariant to preserve: **nothing outside `/volume2/docker` can be deleted** — delete targets come from a sourced `.env`, so every path is validated against that root and rejected if it escapes, contains `..`, or is the root itself. `.env` files survive teardown (so no re-prompt for the admin password, and the arr API keys are not lost). The download tree survives too, though it is inside the root — see `## Arr`. `nas-net` is removed last, once nothing is still attached — it is script-managed now, not owned by any one unit's compose file.
 
 ## Networking & routing
 
 Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other service is reached on its own port via a dashboard tile. Plain HTTP.
 
 - Adding a service: publish its port, give it `homepage.*` labels, done.
-- `nas-net` is defined by `core` (not `external:` there); consumer stacks join it as `external: true`. Bridge by default — `network_mode: host` only for a service that strictly needs broadcast/multicast on the LAN (Jellyfin is the one exception).
+- `nas-net` is created and removed by `up.sh`/`down.sh` directly (`docker network create/rm`), not owned by any compose file — every unit's compose file, including Homepage's, declares it as `external: true`. Bridge by default — `network_mode: host` only for a service that strictly needs broadcast/multicast on the LAN (Jellyfin is the one exception).
 - **`nas-net` carries real traffic now** — the arr services resolve each other by container name over it (Prowlarr → `http://sonarr:8989`, Sonarr → `http://qbittorrent:8080`, Homepage widgets → all of them). **Jellyfin is still not on it** (host-networked), so don't assume Homepage and Jellyfin share a network when debugging. A container-name address that works from Sonarr will not work from Jellyfin.
 - Homepage's Docker integration needs both the socket mount *and* `docker.yaml` in its config dir (template: `homepage-config/docker.yaml`). Labels are read over the **Docker socket API, not the network**, so host-networked and off-`nas-net` containers still auto-discover.
 - **Socket access is a DAC problem, and `EACCES` is not a path problem.** `/var/run/docker.sock` is `root:docker` `0660` (`DOCKER_GID=121`). Homepage sets identity via `user: "${PUID}:${DOCKER_GID}"` — *not* the image's `PUID`/`PGID`, which decide it inside the entrypoint where `docker inspect` can't see the result, and *not* `group_add`, whose supplementary GID a privilege drop can discard. A primary GID survives, and matching the socket's group needs no `DAC_OVERRIDE`. `/app/config` is owned by `PUID`, so it stays writable. When discovery fails, no container is listed at all and Homepage renders only `services.yaml` — it looks like one service being ignored, not a dead integration. Diagnose by mechanism, in order: `ENOENT` means the path is wrong, `EACCES` means it was found and refused — so check `docker inspect` for `CapDrop`/`SecurityOpt`, `/proc/1/status` for `CapEff` and PID 1's real `Groups` (a `docker exec` session gets fresh credentials and can differ from the server process), and `dmesg | grep denied` for AppArmor. `:ro` on the socket restricts nothing about the API.
@@ -138,18 +193,18 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
   jq -r '.paths | to_entries[] | select(.key|test("^/Startup")) | "\(.key) [\(.value|keys|join(","))]"' reference/jellyfin-openapi.json
   ```
 
-- **The Homepage widget secrets are bootstrap-minted, not up.sh-generated.** `jellyfin-bootstrap.sh` creates the `Homepage` API key via `/Auth/Keys` (keys live in Jellyfin's database and cannot be env-seeded) and resolves the `RefreshLibrary` scheduled-task id, writing both back to `jellyfin.env`. They reach Homepage as container labels (`homepage.widgets[N].*`), which are **baked in at container create — `docker restart` never refreshes them** — so `up.sh` recreates the container via compose when the `homepage.widgets[0].key` label lags the file. Empty on first bring-up by necessity, so unlike other secrets these two default to empty in the compose file. The widget URLs use `JELLYFIN_LAN_HOST` (host LAN IP) because Homepage fetches them itself and Jellyfin is host-networked. A wiped Jellyfin config invalidates the key; a bootstrap re-run mints a fresh one and triggers the recreate.
+- **The Homepage widget secrets are bootstrap-minted, not up.sh-generated.** `jellyfin-bootstrap.sh` creates the `Homepage` API key via `/Auth/Keys` (keys live in Jellyfin's database and cannot be env-seeded) and resolves the `RefreshLibrary` scheduled-task id, writing both back to `jellyfin.env`. They reach Homepage as container labels (`homepage.widgets[N].*`), which are **baked in at container create — `docker restart` never refreshes them** — so `up.sh` recreates the container via compose when the `homepage.widgets[0].key` label lags the file. Empty on first bring-up by necessity, so unlike other secrets these two default to empty in the compose file. The widget URLs use `LAN_HOST` (shared.env, the host LAN IP) because Homepage fetches them itself and Jellyfin is host-networked. A wiped Jellyfin config invalidates the key; a bootstrap re-run mints a fresh one and triggers the recreate.
 - Logs live in `/volume2/docker/jellyfin/config/log/` — inside the directory a reset wipes. Grab them first.
 
 ## Arr
 
-- **`arr.env` is load-bearing forever, not just at first run.** The API keys are injected as `SONARR__AUTH__APIKEY` etc., which the apps read at every start *in place of* `config.xml` — so the key is never persisted there. Lose the file and each app silently generates and persists a new random key, breaking Prowlarr's sync, Configarr and all three Homepage widgets at once, with no error anywhere. `up.sh` generates them once and never regenerates. **A 401 from a bootstrap step usually means a container older than the current `arr.env`**, not a wrong key — recreate it.
+- **Each arr unit's own `.env` is load-bearing forever, not just at first run.** The API keys are injected as `SONARR__AUTH__APIKEY` etc. (one key, one file, one unit: `sonarr.env`/`radarr.env`/`prowlarr.env`/`seerr.env`), which the apps read at every start *in place of* `config.xml` — so the key is never persisted there. Lose one of these files and that app silently generates and persists a new random key, breaking Prowlarr's sync, Configarr and that unit's Homepage widget at once, with no error anywhere. `up.sh` generates each one once and never regenerates. **A 401 from a bootstrap step usually means a container older than its current `.env`**, not a wrong key — recreate it.
 - **Imports are copies, not hardlinks, on purpose.** Downloads live on `/volume2` (SSD) and the library on `/volume1` (HDD): different filesystems, so no hardlink is possible and every import is a full copy. The trade was deliberate — seeding runs off the SSD and never holds the media HDD awake. Consequences to keep in mind: transient 2× space for the file being imported, and `copyUsingHardlinks` is asserted but inert. Moving downloads to `/volume1` is what would make hardlinks work.
 - **The seed cap stops torrents; the arr apps delete them.** `Session\ShareLimitAction=Stop` in `qBittorrent.conf` (with `GlobalMaxRatio` / `GlobalMaxSeedingMinutes`) pairs with `removeCompletedDownloads: true` on the Sonarr/Radarr download clients: the app removes a torrent **and its files** only once qBittorrent reports it stopped at the cap — never mid-seed, and never before import — which is what frees the SSD. Config traps: the key is **not** `MaxRatioAction` (obsolete), and the value is the enum's **string name** — qBittorrent serialises enums via `Utils::String::fromEnum`, so an integer fails to parse and silently falls back to the default.
 - **Do not "fix" this back to qBittorrent-side removal.** `RemoveWithContent` + `removeCompletedDownloads: false` looks equivalent but can delete a download that has not been imported yet (cap reached while the import is queued or stuck), and Sonarr/Radarr's download-client POST/PUT hard-rejects a qBittorrent set to remove-at-limit (HTTP 400, `isWarning: false`). The bootstrap deliberately does **not** `forceSave` past that test — it now guards the pairing, and it is also the connection/auth check. The old claim that `removeCompletedDownloads: true` kills seeding right after import was v2-era behavior, long gone from the pinned versions.
 - **Two accepted costs of arr-side removal:** a torrent added outside the arr apps (or in a foreign category) stops at the cap but is never deleted — manual cleanup; and a failed import holds its data on the SSD until someone resolves it in the Activity queue, instead of being silently reaped.
 - **qBittorrent mints a new random WebUI password on every start unless one is stored.** The sole trigger is an empty stored password (`WEBUI_PORT` is unrelated), and the temporary one is per-session, never persisted — so without pre-seeding, every restart invalidates the credentials Sonarr and Radarr hold. `up.sh` seeds a PBKDF2 hash (SHA-512, 100000 iterations, 16-byte salt, 64-byte key, `base64(salt):base64(key)` inside `@ByteArray(...)`) before first start. qBittorrent **rewrites this file on clean shutdown**, so it is a first-boot seed, not ongoing config management.
-- **Adding a Prowlarr indexer is GET-schema-modify-POST, and that is enforced by code.** `IndexerResource.ToModel()` looks every non-standard field up in the cached Cardigann definition and throws `ArgumentOutOfRangeException` on anything unrecognised, so a hand-written body is rejected. Fetch `/api/v1/indexer/schema`, select by `definitionName`, modify, POST. **The schema's `appProfileId` is a placeholder `0` that fails validation** (`'App Profile Id' must be greater than '0'`, HTTP 400, on `forceSave` bodies too) — resolve the real sync-profile id from `GET /api/v1/appprofile` and patch it in; this and the rest of the tracker wiring live in `arr-indexers.sh`, not the bootstrap. Every indexer is POSTed **without** `forceSave` first, so the create path tests each one — for private trackers that test is the login check, the only automatic one they ever get. On failure `arr-indexers.sh` prompts (via `/dev/tty` — stdin carries the indexer list): retry / update credentials / save untested (`?forceSave=true`) / skip; with `--non-interactive` or no terminal it saves untested with a warning instead, so unattended runs never hang. Private indexers ride the same path via `ARR_INDEXERS_PRIVATE` + `ARR_INDEXER_<NAME>_USER`/`_PASS` in `arr.env` (username/password logins only; anything cookie/2FA-based is skipped with its field names printed). Credentials fixed at the prompt live only in Prowlarr — the script warns to copy them back into `arr.env`, which a re-run after a wipe would otherwise reuse stale.
+- **Adding a Prowlarr indexer is GET-schema-modify-POST, and that is enforced by code.** `IndexerResource.ToModel()` looks every non-standard field up in the cached Cardigann definition and throws `ArgumentOutOfRangeException` on anything unrecognised, so a hand-written body is rejected. Fetch `/api/v1/indexer/schema`, select by `definitionName`, modify, POST. **The schema's `appProfileId` is a placeholder `0` that fails validation** (`'App Profile Id' must be greater than '0'`, HTTP 400, on `forceSave` bodies too) — resolve the real sync-profile id from `GET /api/v1/appprofile` and patch it in; this and the rest of the tracker wiring live in `arr-indexers.sh`, not the bootstrap. Every indexer is POSTed **without** `forceSave` first, so the create path tests each one — for private trackers that test is the login check, the only automatic one they ever get. On failure `arr-indexers.sh` prompts (via `/dev/tty` — stdin carries the indexer list): retry / update credentials / save untested (`?forceSave=true`) / skip; with `--non-interactive` or no terminal it saves untested with a warning instead, so unattended runs never hang. Private indexers ride the same path via `ARR_INDEXERS_PRIVATE` + `ARR_INDEXER_<NAME>_USER`/`_PASS` in `prowlarr.env` (username/password logins only; anything cookie/2FA-based is skipped with its field names printed). Credentials fixed at the prompt live only in Prowlarr — the script warns to copy them back into `prowlarr.env`, which a re-run after a wipe would otherwise reuse stale.
 - **Byparr is the Cloudflare solver, registered under Prowlarr's `FlareSolverr` implementation** — it speaks that API, and there is no "Byparr" implementation. Prowlarr routes a request through the proxy only when it detects a Cloudflare challenge *and* the indexer shares a tag with the proxy, so `arr-indexers.sh` tags every indexer with `byparr` — free on unprotected trackers, future-proof for the rest. A proxy with no matching tagged indexer is a Prowlarr health warning (which is why the proxy moved to `arr-indexers.sh` along with the indexers). Byparr is GET-only: `request.post` is accepted but degrades to a GET — acceptable because the Cloudflare-protected trackers here all search via GET; an indexer that needs POST-through-solver is the one reason to reconsider. `POST /api/v1/indexerproxy` tests the proxy on create exactly like indexers do, with the same no-forceSave-then-fallback idiom (byparr may still be starting). FlareSolverr itself was replaced because it stopped clearing modern Cloudflare managed challenges; the swap is one image line plus this wiring.
 - **Prowlarr is API v1; Sonarr and Radarr are v3.** The wrong version 404s, which reads as a bad key rather than a bad path.
 - In `/api/v1/applications`, **`prowlarrUrl` is Prowlarr's own address and `baseUrl` is the target app's.** Easy to swap, and confusing when swapped.
@@ -163,13 +218,13 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
 - **Ofelia is the second container with the docker socket**, after Homepage — root-equivalent host access, accepted for the same reasons and set up the same way (primary GID via `user: "${PUID}:${DOCKER_GID}"`, which survives a privilege drop; `:ro` restricts nothing about the API).
 - **What configarr is deliberately not allowed to manage**, all of it left to `arr-bootstrap.sh`: `download_clients` (it would rewrite the qBittorrent password, and the client definition is `arr-bootstrap.sh`'s contract — including `removeCompletedDownloads: true`), `root_folders` (deletes and recreates to match the file), `delay_profiles` (deletes any profile not listed, and its example is usenet-defaulted), `media_naming` (would rename the existing library), and every `delete_unmanaged_*` toggle.
 - **`down.sh` never deletes the download tree**, though it sits under `SAFE_ROOT` and would be accepted. Config comes back from this repo; a part-done or still-seeding torrent does not.
-- **Seerr is the request front-end** (`ghcr.io/seerr-team/seerr` — the merged successor of Jellyseerr/Overseerr; those names live on only as Homepage widget aliases). Not an LSIO image: identity via compose `user:`, config at `/app/config`. Its API key is injected as the `API_KEY` env var, which Seerr **writes over `settings.json`'s stored `apiKey` at every start** — so `arr.env` is the only source of truth and rotating the key in the Seerr UI silently doesn't survive a restart. Auth header is `X-Api-Key`, same as the arr apps.
+- **Seerr is the request front-end** (`ghcr.io/seerr-team/seerr` — the merged successor of Jellyseerr/Overseerr; those names live on only as Homepage widget aliases). Not an LSIO image: identity via compose `user:`, config at `/app/config`. Its API key is injected as the `API_KEY` env var, which Seerr **writes over `settings.json`'s stored `apiKey` at every start** — so `seerr.env` is the only source of truth and rotating the key in the Seerr UI silently doesn't survive a restart. Auth header is `X-Api-Key`, same as the arr apps.
 - **Seerr's setup is re-runnable until `POST /api/v1/settings/initialize`** — nothing is one-shot like Jellyfin's wizard, which is why `seerr-bootstrap.sh` calls initialize last, only after everything else succeeded. `POST /api/v1/auth/jellyfin` needs **no prior auth**: with no users it creates Seerr's admin (user 1) from the Jellyfin account given and stores the media-server settings; `serverType` is the numeric enum (`2` = Jellyfin). On later runs the same call is a plain sign-in. After user 1 exists, `X-Api-Key` acts as admin for everything.
 - **`mediaServerType` is `MediaServerType`, and `4` means nothing was ever configured.** From the pinned image's own source (`server/constants/server.ts`): `PLEX = 1, JELLYFIN = 2, EMBY = 3, NOT_CONFIGURED = 4`. `GET /api/v1/settings/public` reporting `mediaServerType: 4` with `initialized: false` is a **pristine** Seerr, not a broken one — and `plexClientIdentifier` is populated on first boot regardless, so it is not evidence of Plex. Read the enum before concluding anything from that number.
 - **A 403 on `/api/v1/auth/jellyfin` has more than one cause, and the first-user path is not one of them.** Per the spec the first user is created with full admin rights *unconditionally*, so that path cannot 403 over admin status — only the path where a user already exists can. A 403 with no user 1 therefore points at the upstream Jellyfin error in `docker logs seerr`, not at the account's role. The old bootstrap hardcoded "not a Jellyfin administrator" for any 403 and sent debugging down the wrong path on a fresh install; `seerr-bootstrap.sh` now prints the observed state (`initialized`, decoded `mediaServerType`, whether user 1 exists, the raw body) instead of asserting a cause.
 - **A 403 from `/api/v1/request/count` (Homepage's widget) usually means Seerr has no user, not a bad key** — the API key only carries admin rights once user 1 exists, so an unconfigured Seerr 403s every authenticated route with a perfectly valid key.
-- **Seerr reaches Jellyfin at the host LAN address (`192.168.0.231:8096`), never a container name** — Jellyfin is host-networked and off `nas-net`, and mDNS doesn't resolve inside containers. Sonarr/Radarr are wired by container name (`sonarr:8989`, `radarr:7878`) like all other nas-net traffic. The Jellyfin admin credentials come from `jellyfin.env`, extracted in a **subshell** — never `set -a`-sourced into the arr shell (shared names would collide, see `arr.env.example`).
+- **Seerr reaches Jellyfin at the host LAN address (`192.168.0.231:8096`), never a container name** — Jellyfin is host-networked and off `nas-net`, and mDNS doesn't resolve inside containers. Sonarr/Radarr are wired by container name (`sonarr:8989`, `radarr:7878`) like all other nas-net traffic. The Jellyfin admin credentials come from `shared.env`'s `ADMIN_USER`/`ADMIN_PASSWORD` — the single identity Jellyfin's admin login and qBittorrent's WebUI also use.
 - **`seerr-bootstrap.sh` is separate from `arr-bootstrap.sh` and must run after it** — because it binds requests to the TRaSH profiles (`WEB-1080p` / `HD Bluray + WEB`) that configarr creates, falling back to the first profile with a warning. It was extracted *from* `arr-bootstrap.sh` after a bring-up left Seerr entirely unconfigured with no failure visible anywhere: every step was `warn; return 0`, the function's return value was discarded, and `up.sh` exited 0 and printed "Done". **A failure that cannot be distinguished from a deliberate skip is the bug**, so it now exits non-zero (`1` precondition, `22` API), and `up.sh` defers that rc — stack stays up, a banner prints in the summary, `up.sh` exits non-zero. `SEERR_CONFIGURE=0` (old name `ARR_CONFIGURE_SEERR`, still read) is the deliberate skip and stays exit 0.
-- **It reads two env files**, the only script that does: `arr.env` for the keys and root folders, `jellyfin.env` for the admin credentials — the latter one variable at a time in an isolating **subshell**, never `set -a`-sourced, since the two files share names (`TZ`, `PUID`, `PGID`). Both paths resolve `./`-prefixed for bare filenames, so a run from another cwd cannot silently read nothing; `JELLYFIN_ENV_FILE` overrides. Note `up.sh` prompts for the Jellyfin password **only when the jellyfin tier is selected**, so `sudo ./up.sh arr` leaves it empty and Seerr's setup cannot proceed.
+- **It reads four env files**: `shared.env` for `ADMIN_USER`/`ADMIN_PASSWORD` and `LAN_HOST`, `seerr.env` for its own key and settings, and `sonarr.env`/`radarr.env` for their keys and root folders. Unlike the old `arr.env`/`jellyfin.env` split, none of these four share a variable name, so they are sourced directly — no isolating subshell needed anymore. Each path resolves `./`-prefixed for a bare filename, so a run from another cwd cannot silently read nothing; the usual `*_ENV_FILE` variables override each one. Note `up.sh` prompts for `ADMIN_PASSWORD` whenever `jellyfin` or `qbittorrent` is selected, so `sudo ./up.sh sonarr radarr prowlarr seerr` without either of those leaves it empty and Seerr's setup cannot proceed.
 - `GET /settings/jellyfin/library?enable=` **replaces** the enabled set — any library not listed is disabled — so the bootstrap only touches it pre-initialize.
 - **DLNA is a plugin** (not core since 10.10) and bootstrap installs it: resolve it in `GET /Packages` (never hardcode the name), `POST /Packages/Installed/{name}`, then poll `GET /Plugins`. The `204` only means *queued* — a failure past it shows up only in the Jellyfin log. Casing differs per endpoint: `PackageInfo` is camelCase (`name`/`guid`), `PluginInfo` is PascalCase (`Name`/`Id`/`Status`). **No mid-run restart** — Jellyfin does not hot-load plugins, so a new one sits at `Status: Restart` and rides the existing deferred-restart channel (`exit 10` → `up.sh` restarts → scan). Every DLNA call is non-fatal: a failed install must not abort before the base URL is asserted. `JELLYFIN_INSTALL_DLNA=0` skips it.

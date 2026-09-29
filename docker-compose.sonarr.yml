@@ -1,0 +1,54 @@
+services:
+  sonarr:
+    image: linuxserver/sonarr:4.0.19.2979-ls321
+    container_name: sonarr
+    restart: unless-stopped
+    # LinuxServer.io images take identity as environment and usermod internally,
+    # unlike Homepage and Jellyfin which set `user:`. Neither touches the docker
+    # socket, so an inspectable identity is not needed here. See spec section 8.
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-10}
+      UMASK: ${UMASK:-002}
+      TZ: ${TZ:-Europe/Bucharest}
+      # Read at every start and never persisted to config.xml. Losing
+      # sonarr.env mints a new key silently. See spec section 8.
+      SONARR__AUTH__APIKEY: ${SONARR_API_KEY:?SONARR_API_KEY is unset — run up.sh to generate it}
+      SONARR__AUTH__METHOD: Forms
+      SONARR__AUTH__REQUIRED: DisabledForLocalAddresses
+      SONARR__LOG__ANALYTICSENABLED: "False"
+    ports:
+      - "${SONARR_PORT:-8989}:8989"
+    volumes:
+      - ${SONARR_CONFIG_DIR:-/volume2/docker/sonarr/config}:/config
+      - ${ARR_SERIES_DIR:-/volume1/Media/Series}:/media/series
+      # Identical container path in sonarr, radarr and qbittorrent: qBittorrent
+      # reports absolute paths, so a mismatch fails every import. Shared via
+      # DOWNLOADS_DIR in shared.env, not a per-service value.
+      - ${DOWNLOADS_DIR:-/volume2/docker/downloads}:/downloads
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=Sonarr
+      - homepage.icon=sonarr.png
+      - homepage.href=http://apollo.local:${SONARR_PORT:-8989}
+      - homepage.description=TV series
+      # siteMonitor is probed by the Homepage container itself, so container
+      # names over nas-net — same resolution rule as widget.url below.
+      - homepage.siteMonitor=http://sonarr:8989
+      - homepage.widget.type=sonarr
+      # href is resolved by the browser, widget.url by the Homepage container.
+      - homepage.widget.url=http://sonarr:8989
+      - homepage.widget.key=${SONARR_API_KEY:?SONARR_API_KEY is unset — run up.sh to generate it}
+      - homepage.widget.enableQueue=true
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

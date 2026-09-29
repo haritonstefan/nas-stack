@@ -14,16 +14,19 @@
 # one-shot: every step reads the current state first and skips what is already
 # configured, so a partial run can simply be repeated.
 #
-# Every app's API key is pre-seeded via <APP>__AUTH__APIKEY from arr.env, so no
-# key is ever read out of a config.xml and there is no ordering dependency
-# between the services.
+# Every app's API key is pre-seeded via <APP>__AUTH__APIKEY from its own
+# .env file, so no key is ever read out of a config.xml and there is no
+# ordering dependency between the services.
 #
 #   ./arr-bootstrap.sh
 #   ./arr-bootstrap.sh --dry-run
 #   ./arr-bootstrap.sh --verbose
 #   SONARR_URL=http://apollo.local:8989 ./arr-bootstrap.sh
 #
-# Requires: curl, jq. Reads arr.env if present (for the API keys).
+# Requires: curl, jq. Reads shared.env (ADMIN_USER/ADMIN_PASSWORD, the
+# identity qBittorrent's WebUI uses) plus sonarr.env, radarr.env,
+# prowlarr.env, qbittorrent.env and configarr.env if present, each one
+# scoped to the vars that service owns.
 #
 # Exit codes: 0 success. 1 precondition failure. 22 an API call returned a
 # non-2xx. There is deliberately no restart channel (Jellyfin's exit 10) —
@@ -49,17 +52,55 @@ for arg in "$@"; do
   esac
 done
 
-ENV_FILE="${ENV_FILE:-arr.env}"
-if [ -f "$ENV_FILE" ]; then
-  set -a
+# Each read in a bare `. file`, not a subshell: unlike seerr-bootstrap.sh's
+# split of arr.env vs jellyfin.env, none of these five files share a name, so
+# there is nothing for a later file to accidentally clobber in an earlier one.
+SHARED_ENV_FILE="${SHARED_ENV_FILE:-shared.env}"
+SONARR_ENV_FILE="${SONARR_ENV_FILE:-sonarr.env}"
+RADARR_ENV_FILE="${RADARR_ENV_FILE:-radarr.env}"
+PROWLARR_ENV_FILE="${PROWLARR_ENV_FILE:-prowlarr.env}"
+QBITTORRENT_ENV_FILE="${QBITTORRENT_ENV_FILE:-qbittorrent.env}"
+CONFIGARR_ENV_FILE="${CONFIGARR_ENV_FILE:-configarr.env}"
+
+source_env_file() {
   # Prefixed with ./ only for a bare filename, so that a relative name is read
   # from here rather than $PATH, without mangling an absolute override.
+  local f="$1"
+  [ -f "$f" ] || return 0
+  set -a
   # shellcheck disable=SC1090
-  case "$ENV_FILE" in
-    /*|./*|../*) . "$ENV_FILE" ;;
-    *)           . "./$ENV_FILE" ;;
+  case "$f" in
+    /*|./*|../*) . "$f" ;;
+    *)           . "./$f" ;;
   esac
   set +a
+}
+source_env_file "$SHARED_ENV_FILE"
+source_env_file "$SONARR_ENV_FILE"
+source_env_file "$RADARR_ENV_FILE"
+source_env_file "$PROWLARR_ENV_FILE"
+source_env_file "$QBITTORRENT_ENV_FILE"
+source_env_file "$CONFIGARR_ENV_FILE"
+
+# Which arr units are actually part of this stack. up.sh only ever creates
+# <unit>.env for a unit it was asked to bring up (see up.sh's "Preparing .env
+# files"), so file presence is the same signal it already uses elsewhere — no
+# extra plumbing needed from up.sh to tell this script what was selected.
+# Every step below is gated on these instead of assuming all four exist, so a
+# stack that only has e.g. sonarr/radarr/prowlarr (no qbittorrent yet) doesn't
+# fail at the precondition check or hang waiting for a service that was never
+# brought up.
+have_sonarr=0;   [ -f "$SONARR_ENV_FILE" ]      && have_sonarr=1
+have_radarr=0;   [ -f "$RADARR_ENV_FILE" ]      && have_radarr=1
+have_prowlarr=0; [ -f "$PROWLARR_ENV_FILE" ]    && have_prowlarr=1
+have_qbt=0;      [ -f "$QBITTORRENT_ENV_FILE" ] && have_qbt=1
+have_configarr=0;[ -f "$CONFIGARR_ENV_FILE" ]   && have_configarr=1
+
+if [ "$have_sonarr" -eq 0 ] && [ "$have_radarr" -eq 0 ] && \
+   [ "$have_prowlarr" -eq 0 ] && [ "$have_qbt" -eq 0 ]; then
+  echo "Nothing to configure — none of sonarr.env/radarr.env/prowlarr.env/qbittorrent.env is present." >&2
+  echo "Run up.sh with at least one of those units first." >&2
+  exit 0
 fi
 
 SONARR_URL="${SONARR_URL:-http://127.0.0.1:8989}"
@@ -69,7 +110,9 @@ PROWLARR_URL="${PROWLARR_URL:-http://127.0.0.1:9696}"
 SONARR_ROOT_FOLDER="${SONARR_ROOT_FOLDER:-/media/series}"
 RADARR_ROOT_FOLDER="${RADARR_ROOT_FOLDER:-/media/movies}"
 
-QBITTORRENT_USER="${QBITTORRENT_USER:-admin}"
+# The shared identity (shared.env), not a qBittorrent-only credential — the
+# same account backs the Jellyfin admin login and Seerr's sign-in.
+ADMIN_USER="${ADMIN_USER:-admin}"
 QBITTORRENT_PORT="${QBITTORRENT_PORT:-8080}"
 
 ARR_RUN_CONFIGARR="${ARR_RUN_CONFIGARR:-1}"
@@ -86,19 +129,28 @@ for cmd in curl jq; do
 done
 
 if [ "$DRY_RUN" -eq 0 ]; then
-  for var in SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY QBITTORRENT_PASSWORD; do
+  # Only required for units actually present this run — ADMIN_PASSWORD only
+  # matters when qbittorrent is, since it's solely used to wire qBittorrent's
+  # WebUI credentials into Sonarr/Radarr's download client (see have_qbt below).
+  require_var() {
+    local var="$1" val
     eval "val=\${${var}:-}"
     if [ -z "$val" ]; then
-      echo "ERROR: ${var} is not set (put it in ${ENV_FILE}, or run up.sh which" >&2
-      echo "       generates it). The stack cannot be configured without it." >&2
+      echo "ERROR: ${var} is not set (run up.sh, which generates the API keys" >&2
+      echo "       and prompts for ADMIN_PASSWORD). The stack cannot be" >&2
+      echo "       configured without it." >&2
       exit 1
     fi
-  done
+  }
+  [ "$have_sonarr" -eq 1 ]   && require_var SONARR_API_KEY
+  [ "$have_radarr" -eq 1 ]   && require_var RADARR_API_KEY
+  [ "$have_prowlarr" -eq 1 ] && require_var PROWLARR_API_KEY
+  [ "$have_qbt" -eq 1 ]      && require_var ADMIN_PASSWORD
 fi
 : "${SONARR_API_KEY:=<unset>}"
 : "${RADARR_API_KEY:=<unset>}"
 : "${PROWLARR_API_KEY:=<unset>}"
-: "${QBITTORRENT_PASSWORD:=<unset>}"
+: "${ADMIN_PASSWORD:=<unset>}"
 
 say()  { echo "==> $1"; }
 info() { echo "    $1"; }
@@ -158,54 +210,20 @@ api() {
   return 22
 }
 
-# Passwords and API keys travel inside `fields` arrays, so masking has to reach
-# into them by name rather than looking at top-level keys.
-mask() {
-  printf '%s' "$1" | jq -c '
-    if type == "object" then
-      (if has("fields") then
-         .fields |= map(if (.name // "" | test("password|apiKey"; "i")) then .value = "***" else . end)
-       else . end)
-      | (if has("password") then .password = "***" else . end)
-    else . end' 2>/dev/null || echo '<unprintable>'
-}
+# mask() and wait_for() — shared with seerr-bootstrap.sh and arr-indexers.sh.
+. ./lib-http.sh
 
 if [ "$DRY_RUN" -eq 1 ]; then
   say "DRY RUN — no requests will be sent"
 fi
 
 # --- readiness ---------------------------------------------------------------
-
-wait_for() {
-  # wait_for <name> <base-url>
-  local name="$1" base="$2" i probe
-  if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] would wait for ${name} at ${base}"
-    return 0
-  fi
-  for i in $(seq 1 90); do
-    # /ping is unauthenticated and only 200s once the app is genuinely serving.
-    # A TCP connect is not enough: these apps accept connections well before
-    # they finish migrating their database. The JSON shape is checked too, since
-    # a reverse proxy or a wrong port can 200 with something else entirely.
-    if probe=$(curl -fsS --max-time 5 "${base}/ping" 2>/dev/null) \
-       && printf '%s' "$probe" | jq -e '.status == "OK"' >/dev/null 2>&1; then
-      info "${name} ready at ${base}"
-      return 0
-    fi
-    if [ "$i" -eq 90 ]; then
-      echo "ERROR: ${name} did not answer at ${base}/ping after 180s." >&2
-      echo "       Check: docker logs ${name}" >&2
-      exit 1
-    fi
-    sleep 2
-  done
-}
+# wait_for() comes from lib-http.sh.
 
 say "Waiting for the arr services"
-wait_for sonarr   "$SONARR_URL"
-wait_for radarr   "$RADARR_URL"
-wait_for prowlarr "$PROWLARR_URL"
+[ "$have_sonarr" -eq 1 ]   && wait_for sonarr   "$SONARR_URL"
+[ "$have_radarr" -eq 1 ]   && wait_for radarr   "$RADARR_URL"
+[ "$have_prowlarr" -eq 1 ] && wait_for prowlarr "$PROWLARR_URL"
 
 # qBittorrent too, and not just for tidiness: POST /downloadclient runs
 # Test(definition) whenever the client is enabled, so adding it while qBittorrent
@@ -232,34 +250,34 @@ wait_for_qbittorrent() {
     sleep 2
   done
 }
-wait_for_qbittorrent
+[ "$have_qbt" -eq 1 ] && wait_for_qbittorrent
 
 # A 401 here means the pre-seeded key never reached the app — almost always a
-# stale container from before arr.env existed. Worth its own message, because
-# every later call would fail the same way with a less obvious cause.
+# stale container from before its .env file existed. Worth its own message,
+# because every later call would fail the same way with a less obvious cause.
 if [ "$DRY_RUN" -eq 0 ]; then
   check_key() {
-    # check_key <name> <base-url> <api-key> <api-version>
+    # check_key <name> <base-url> <api-key> <api-version> <env-file>
     # Prowlarr is on API v1, Sonarr and Radarr on v3 — the wrong one 404s, which
     # would read as a bad key rather than a bad path.
-    local name="$1" base="$2" key="$3" ver="$4" status
+    local name="$1" base="$2" key="$3" ver="$4" env_file="$5" status
     status=$(curl -sS -o /dev/null -w '%{http_code}' \
       -H "X-Api-Key: ${key}" "${base}/api/${ver}/system/status" 2>/dev/null || echo 000)
     case "$status" in
       2*) return 0 ;;
       401|403)
-        echo "ERROR: ${name} rejected the API key from ${ENV_FILE} (HTTP ${status})." >&2
+        echo "ERROR: ${name} rejected the API key from ${env_file} (HTTP ${status})." >&2
         echo "       The key is injected at container start, so a container that" >&2
-        echo "       predates the current ${ENV_FILE} still has the old one:" >&2
-        echo "         docker compose -p nas-arr --env-file ${ENV_FILE} -f docker-compose.arr.yml up -d --force-recreate ${name}" >&2
+        echo "       predates the current ${env_file} still has the old one:" >&2
+        echo "         docker compose -p nas-${name} --env-file shared.env --env-file ${env_file} -f docker-compose.${name}.yml up -d --force-recreate ${name}" >&2
         exit 1 ;;
       *)
         warn "${name}: unexpected HTTP ${status} from its status endpoint" ;;
     esac
   }
-  check_key sonarr   "$SONARR_URL"   "$SONARR_API_KEY"   v3
-  check_key radarr   "$RADARR_URL"   "$RADARR_API_KEY"   v3
-  check_key prowlarr "$PROWLARR_URL" "$PROWLARR_API_KEY" v1
+  [ "$have_sonarr" -eq 1 ]   && check_key sonarr   "$SONARR_URL"   "$SONARR_API_KEY"   v3 "$SONARR_ENV_FILE"
+  [ "$have_radarr" -eq 1 ]   && check_key radarr   "$RADARR_URL"   "$RADARR_API_KEY"   v3 "$RADARR_ENV_FILE"
+  [ "$have_prowlarr" -eq 1 ] && check_key prowlarr "$PROWLARR_URL" "$PROWLARR_API_KEY" v1 "$PROWLARR_ENV_FILE"
 fi
 
 # --- root folders ------------------------------------------------------------
@@ -282,8 +300,8 @@ add_root_folder() {
   info "${name}: ${path} added"
 }
 
-add_root_folder sonarr "$SONARR_URL" "$SONARR_API_KEY" "$SONARR_ROOT_FOLDER"
-add_root_folder radarr "$RADARR_URL" "$RADARR_API_KEY" "$RADARR_ROOT_FOLDER"
+[ "$have_sonarr" -eq 1 ] && add_root_folder sonarr "$SONARR_URL" "$SONARR_API_KEY" "$SONARR_ROOT_FOLDER"
+[ "$have_radarr" -eq 1 ] && add_root_folder radarr "$RADARR_URL" "$RADARR_API_KEY" "$RADARR_ROOT_FOLDER"
 
 # --- download client ---------------------------------------------------------
 
@@ -320,8 +338,8 @@ add_download_client() {
   body=$(jq -n \
     --arg host "$QBITTORRENT_HOST" \
     --argjson port "$QBITTORRENT_PORT" \
-    --arg user "$QBITTORRENT_USER" \
-    --arg pass "$QBITTORRENT_PASSWORD" \
+    --arg user "$ADMIN_USER" \
+    --arg pass "$ADMIN_PASSWORD" \
     --arg catfield "$cat_field" \
     --arg cat "$cat" \
     '{
@@ -354,8 +372,12 @@ add_download_client() {
   info "${name}: qBittorrent added (category ${cat}; removes torrent+data after the seed cap)"
 }
 
-add_download_client sonarr "$SONARR_URL" "$SONARR_API_KEY" tvCategory    tv-sonarr
-add_download_client radarr "$RADARR_URL" "$RADARR_API_KEY" movieCategory radarr
+if [ "$have_qbt" -eq 1 ]; then
+  [ "$have_sonarr" -eq 1 ] && add_download_client sonarr "$SONARR_URL" "$SONARR_API_KEY" tvCategory    tv-sonarr
+  [ "$have_radarr" -eq 1 ] && add_download_client radarr "$RADARR_URL" "$RADARR_API_KEY" movieCategory radarr
+else
+  info "qbittorrent not present — skipping download client wiring"
+fi
 
 # --- media management --------------------------------------------------------
 
@@ -388,63 +410,71 @@ set_media_management() {
   info "${name}: hardlinks asserted, subtitle extras imported"
 }
 
-set_media_management sonarr "$SONARR_URL" "$SONARR_API_KEY"
-set_media_management radarr "$RADARR_URL" "$RADARR_API_KEY"
+[ "$have_sonarr" -eq 1 ] && set_media_management sonarr "$SONARR_URL" "$SONARR_API_KEY"
+[ "$have_radarr" -eq 1 ] && set_media_management radarr "$RADARR_URL" "$RADARR_API_KEY"
 
 # --- prowlarr app sync -------------------------------------------------------
 
-say "Connecting Prowlarr to Sonarr and Radarr"
-add_application() {
-  # add_application <name> <implementation> <target-internal-url> <target-key> <extra-jq>
-  local name="$1" impl="$2" target="$3" target_key="$4" extra="$5" existing body
-  if [ "$DRY_RUN" -eq 0 ]; then
-    existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/applications \
-      | jq -r '.[].name')
-    if printf '%s\n' "$existing" | grep -Fxq "$name"; then
-      info "${name}: exists, skipping"
-      return 0
+if [ "$have_prowlarr" -eq 1 ]; then
+  say "Connecting Prowlarr to Sonarr and Radarr"
+  add_application() {
+    # add_application <name> <implementation> <target-internal-url> <target-key> <extra-jq>
+    local name="$1" impl="$2" target="$3" target_key="$4" extra="$5" existing body
+    if [ "$DRY_RUN" -eq 0 ]; then
+      existing=$(api "$PROWLARR_URL" "$PROWLARR_API_KEY" GET /api/v1/applications \
+        | jq -r '.[].name')
+      if printf '%s\n' "$existing" | grep -Fxq "$name"; then
+        info "${name}: exists, skipping"
+        return 0
+      fi
     fi
+
+    # Two different addresses, easy to swap and confusing when swapped:
+    #   prowlarrUrl — where the target app should reach Prowlarr
+    #   baseUrl     — where Prowlarr should reach the target app
+    # Both are container names, since this traffic stays on nas-net.
+    body=$(jq -n \
+      --arg name "$name" \
+      --arg impl "$impl" \
+      --arg contract "${impl}Settings" \
+      --arg prowlarr "$PROWLARR_INTERNAL_URL" \
+      --arg base "$target" \
+      --arg key "$target_key" \
+      '{
+        name: $name,
+        implementation: $impl,
+        implementationName: $impl,
+        configContract: $contract,
+        syncLevel: "fullSync",
+        tags: [],
+        fields: [
+          {name: "prowlarrUrl", value: $prowlarr},
+          {name: "baseUrl",     value: $base},
+          {name: "apiKey",      value: $key}
+        ]
+      }')
+    [ -n "$extra" ] && body=$(printf '%s' "$body" | jq "$extra")
+
+    api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/applications "$body" >/dev/null
+    info "${name}: connected (fullSync)"
+  }
+
+  if [ "$have_sonarr" -eq 1 ]; then
+    add_application Sonarr Sonarr "$SONARR_INTERNAL_URL" "$SONARR_API_KEY" \
+      '.fields += [{name: "syncCategories", value: [5000,5010,5020,5030,5040,5045,5050,5090]},
+                   {name: "animeSyncCategories", value: [5070]}]'
   fi
-
-  # Two different addresses, easy to swap and confusing when swapped:
-  #   prowlarrUrl — where the target app should reach Prowlarr
-  #   baseUrl     — where Prowlarr should reach the target app
-  # Both are container names, since this traffic stays on nas-net.
-  body=$(jq -n \
-    --arg name "$name" \
-    --arg impl "$impl" \
-    --arg contract "${impl}Settings" \
-    --arg prowlarr "$PROWLARR_INTERNAL_URL" \
-    --arg base "$target" \
-    --arg key "$target_key" \
-    '{
-      name: $name,
-      implementation: $impl,
-      implementationName: $impl,
-      configContract: $contract,
-      syncLevel: "fullSync",
-      tags: [],
-      fields: [
-        {name: "prowlarrUrl", value: $prowlarr},
-        {name: "baseUrl",     value: $base},
-        {name: "apiKey",      value: $key}
-      ]
-    }')
-  [ -n "$extra" ] && body=$(printf '%s' "$body" | jq "$extra")
-
-  api "$PROWLARR_URL" "$PROWLARR_API_KEY" POST /api/v1/applications "$body" >/dev/null
-  info "${name}: connected (fullSync)"
-}
-
-add_application Sonarr Sonarr "$SONARR_INTERNAL_URL" "$SONARR_API_KEY" \
-  '.fields += [{name: "syncCategories", value: [5000,5010,5020,5030,5040,5045,5050,5090]},
-               {name: "animeSyncCategories", value: [5070]}]'
-add_application Radarr Radarr "$RADARR_INTERNAL_URL" "$RADARR_API_KEY" \
-  '.fields += [{name: "syncCategories", value: [2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,2090]}]'
+  if [ "$have_radarr" -eq 1 ]; then
+    add_application Radarr Radarr "$RADARR_INTERNAL_URL" "$RADARR_API_KEY" \
+      '.fields += [{name: "syncCategories", value: [2000,2010,2020,2030,2040,2045,2050,2060,2070,2080,2090]}]'
+  fi
+else
+  info "prowlarr not present — skipping Prowlarr app sync"
+fi
 
 # --- configarr ----------------------------------------------------------------
 
-if [ "$ARR_RUN_CONFIGARR" = "1" ]; then
+if [ "$ARR_RUN_CONFIGARR" = "1" ] && [ "$have_sonarr" -eq 1 ] && [ "$have_radarr" -eq 1 ] && [ "$have_configarr" -eq 1 ]; then
   say "Applying TRaSH quality profiles with Configarr"
 
   # No config is generated or rewritten here: configarr-config/config.yml is
@@ -453,10 +483,15 @@ if [ "$ARR_RUN_CONFIGARR" = "1" ]; then
   #
   # A throwaway container with its own --name, so this never collides with the
   # persistent `configarr` container that up.sh creates for the scheduler.
+  # Four --env-file flags: configarr's own compose file needs SONARR_API_KEY/
+  # RADARR_API_KEY, which live in sonarr.env/radarr.env, not a copy in
+  # configarr.env — see docker-compose.configarr.yml.
   configarr_run() {
     # configarr_run <name> [extra docker args...]
     local name="$1"; shift
-    docker compose -p nas-arr --env-file "$ENV_FILE" -f docker-compose.arr.yml \
+    docker compose -p nas-configarr --env-file "$SHARED_ENV_FILE" \
+      --env-file "$SONARR_ENV_FILE" --env-file "$RADARR_ENV_FILE" \
+      --env-file "$CONFIGARR_ENV_FILE" -f docker-compose.configarr.yml \
       run --rm --name "$name" "$@" configarr
   }
 
@@ -483,13 +518,15 @@ if [ "$ARR_RUN_CONFIGARR" = "1" ]; then
     if [ "$rc" -ne 0 ]; then
       warn "configarr failed (exit ${rc}) — profiles are unchanged"
       warn "re-run by hand once reachable:"
-      warn "  docker compose -p nas-arr --env-file ${ENV_FILE} -f docker-compose.arr.yml run --rm configarr"
+      warn "  docker compose -p nas-configarr --env-file ${SHARED_ENV_FILE} --env-file ${SONARR_ENV_FILE} --env-file ${RADARR_ENV_FILE} --env-file ${CONFIGARR_ENV_FILE} -f docker-compose.configarr.yml run --rm configarr"
       return 0
     fi
     info "profiles and custom formats applied"
     return 0
   }
   run_configarr
+elif [ "$ARR_RUN_CONFIGARR" = "1" ]; then
+  warn "skipping configarr sync — sonarr.env/radarr.env/configarr.env not all present yet"
 else
   say "Skipping Configarr (ARR_RUN_CONFIGARR=0) — ofelia still syncs on schedule"
 fi
@@ -497,9 +534,9 @@ fi
 # --- summary -----------------------------------------------------------------
 
 say "Done"
-info "Sonarr:      ${SONARR_URL}   (root ${SONARR_ROOT_FOLDER})"
-info "Radarr:      ${RADARR_URL}   (root ${RADARR_ROOT_FOLDER})"
-info "Prowlarr:    ${PROWLARR_URL}"
+[ "$have_sonarr" -eq 1 ]   && info "Sonarr:      ${SONARR_URL}   (root ${SONARR_ROOT_FOLDER})"
+[ "$have_radarr" -eq 1 ]   && info "Radarr:      ${RADARR_URL}   (root ${RADARR_ROOT_FOLDER})"
+[ "$have_prowlarr" -eq 1 ] && info "Prowlarr:    ${PROWLARR_URL}"
 cat <<'EOF'
 
     Next: run ./seerr-bootstrap.sh to configure Seerr (it must run after this

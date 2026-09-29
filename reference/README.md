@@ -60,7 +60,7 @@ at the repo root of the release tag):
 curl -sSL https://raw.githubusercontent.com/seerr-team/seerr/v3.4.1/seerr-api.yml -o reference/seerr-api.yml
 ```
 
-Refresh it whenever the image tag in `docker-compose.arr.yml` changes — same
+Refresh it whenever the image tag in `docker-compose.seerr.yml` changes — same
 tag, always. Note `.info.version` reads `1.0.0`: that is the *API* version, not
 the app release, so it cannot confirm a match the way Jellyfin's can; the URL
 tag is the only version pin.

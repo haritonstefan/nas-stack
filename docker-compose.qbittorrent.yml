@@ -1,0 +1,46 @@
+services:
+  qbittorrent:
+    image: linuxserver/qbittorrent:5.2.3_v2.0.14-ls472
+    container_name: qbittorrent
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-10}
+      UMASK: ${UMASK:-002}
+      TZ: ${TZ:-Europe/Bucharest}
+      WEBUI_PORT: ${QBITTORRENT_PORT:-8080}
+      TORRENTING_PORT: ${QBITTORRENT_TORRENT_PORT:-6881}
+    ports:
+      - "${QBITTORRENT_PORT:-8080}:${QBITTORRENT_PORT:-8080}"
+      - "${QBITTORRENT_TORRENT_PORT:-6881}:${QBITTORRENT_TORRENT_PORT:-6881}"
+      - "${QBITTORRENT_TORRENT_PORT:-6881}:${QBITTORRENT_TORRENT_PORT:-6881}/udp"
+    volumes:
+      - ${QBITTORRENT_CONFIG_DIR:-/volume2/docker/qbittorrent/config}:/config
+      # Identical container path in sonarr, radarr and qbittorrent — see
+      # sonarr's compose file. Shared via DOWNLOADS_DIR in shared.env.
+      - ${DOWNLOADS_DIR:-/volume2/docker/downloads}:/downloads
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=qBittorrent
+      - homepage.icon=qbittorrent.png
+      - homepage.href=http://apollo.local:${QBITTORRENT_PORT:-8080}
+      - homepage.description=Torrent client
+      - homepage.siteMonitor=http://qbittorrent:${QBITTORRENT_PORT:-8080}
+      - homepage.widget.type=qbittorrent
+      - homepage.widget.url=http://qbittorrent:${QBITTORRENT_PORT:-8080}
+      # The single shared identity (shared.env), not a qBittorrent-only
+      # credential — see shared.env.example.
+      - homepage.widget.username=${ADMIN_USER:-admin}
+      - homepage.widget.password=${ADMIN_PASSWORD:?ADMIN_PASSWORD is unset — run up.sh to set it}
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

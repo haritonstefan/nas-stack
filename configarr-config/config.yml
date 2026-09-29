@@ -2,9 +2,10 @@
 #
 # up.sh installs this into CONFIGARR_CONFIG_DIR only when absent, so on-NAS
 # edits survive. There are no placeholder tokens to substitute: the API keys
-# arrive as environment variables from arr.env via the compose file, and !env
-# resolves them at run time. An unset variable is a hard error, not an empty
-# string.
+# arrive as environment variables — from sonarr.env/radarr.env, passed as
+# extra --env-file flags for this unit (see docker-compose.configarr.yml) —
+# and !env resolves them at run time. An unset variable is a hard error, not
+# an empty string.
 
 trashGuideUrl: https://github.com/TRaSH-Guides/Guides
 recyclarrConfigUrl: https://github.com/recyclarr/config-templates

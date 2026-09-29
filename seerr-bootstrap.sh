@@ -18,10 +18,15 @@
 #   ./seerr-bootstrap.sh --verbose
 #   SEERR_URL=http://apollo.local:5055 ./seerr-bootstrap.sh
 #
-# Requires: curl, jq. Reads two env files, because Seerr straddles two tiers:
-#   arr.env      — SEERR_API_KEY, SONARR_API_KEY, RADARR_API_KEY, root folders
-#   jellyfin.env — JELLYFIN_ADMIN_USER / _PASSWORD, read in an isolating
-#                  subshell so shared names (TZ, PUID, PGID) cannot leak in
+# Requires: curl, jq. Reads four env files:
+#   shared.env   — ADMIN_USER/ADMIN_PASSWORD (Seerr's admin IS this Jellyfin
+#                  account — Seerr has no credential of its own), LAN_HOST
+#                  (how Seerr, on nas-net, reaches host-networked Jellyfin)
+#   seerr.env    — SEERR_API_KEY, SEERR_JELLYFIN_PORT, SEERR_CONFIGURE
+#   sonarr.env   — SONARR_API_KEY, SONARR_ROOT_FOLDER
+#   radarr.env   — RADARR_API_KEY, RADARR_ROOT_FOLDER
+# None of these share a variable name, so — unlike the old arr.env/
+# jellyfin.env split — they are sourced directly, no isolating subshell needed.
 #
 # Exit codes: 0 success, or a deliberate skip via SEERR_CONFIGURE=0.
 #             1 precondition failure (missing credentials, unreachable service).
@@ -58,51 +63,45 @@ for arg in "$@"; do
   esac
 done
 
-# Both env files are resolved the same way: ./ prefixed only for a bare
-# filename, so a relative name is read from here rather than $PATH, without
-# mangling an absolute override.
 source_env() {
-  # shellcheck disable=SC1090
-  case "$1" in
-    /*|./*|../*) . "$1" ;;
-    *)           . "./$1" ;;
-  esac
-}
-
-ENV_FILE="${ENV_FILE:-arr.env}"
-if [ -f "$ENV_FILE" ]; then
+  # ./ prefixed only for a bare filename, so a relative name is read from here
+  # rather than $PATH, without mangling an absolute override.
+  local f="$1"
+  [ -f "$f" ] || return 0
   set -a
-  source_env "$ENV_FILE"
+  # shellcheck disable=SC1090
+  case "$f" in
+    /*|./*|../*) . "$f" ;;
+    *)           . "./$f" ;;
+  esac
   set +a
-fi
-
-# Not sourced into this shell at all: arr.env and jellyfin.env share names
-# (TZ, PUID, PGID), and up.sh sources every selected tier into one shell where
-# the last one wins. Read in subshells instead, one variable at a time.
-JELLYFIN_ENV_FILE="${JELLYFIN_ENV_FILE:-jellyfin.env}"
-jellyfin_env_get() {
-  # jellyfin_env_get <var-name> — empty if the file or the variable is absent.
-  local var="$1"
-  [ -f "$JELLYFIN_ENV_FILE" ] || return 0
-  (
-    set +u
-    source_env "$JELLYFIN_ENV_FILE" >/dev/null 2>&1
-    eval "printf '%s' \"\${${var}:-}\""
-  ) || true
 }
+
+SHARED_ENV_FILE="${SHARED_ENV_FILE:-shared.env}"
+source_env "$SHARED_ENV_FILE"
+
+ENV_FILE="${ENV_FILE:-seerr.env}"
+source_env "$ENV_FILE"
+
+SONARR_ENV_FILE="${SONARR_ENV_FILE:-sonarr.env}"
+source_env "$SONARR_ENV_FILE"
+
+RADARR_ENV_FILE="${RADARR_ENV_FILE:-radarr.env}"
+source_env "$RADARR_ENV_FILE"
 
 SEERR_URL="${SEERR_URL:-http://127.0.0.1:5055}"
 SONARR_ROOT_FOLDER="${SONARR_ROOT_FOLDER:-/media/series}"
 RADARR_ROOT_FOLDER="${RADARR_ROOT_FOLDER:-/media/movies}"
 
 # Renamed from ARR_CONFIGURE_SEERR when this moved out of arr-bootstrap.sh; the
-# old name is still honoured so an existing arr.env keeps working.
+# old name is still honoured so an existing env file keeps working.
 SEERR_CONFIGURE="${SEERR_CONFIGURE:-${ARR_CONFIGURE_SEERR:-1}}"
 
-# Jellyfin as Seerr must reach it: the host LAN address, because Jellyfin is
-# host-networked and not on nas-net — a container name will not resolve, and
-# .local usually does not resolve inside containers either.
-SEERR_JELLYFIN_HOST="${SEERR_JELLYFIN_HOST:-192.168.0.231}"
+# Jellyfin as Seerr must reach it: the host LAN address (shared.env's
+# LAN_HOST), because Jellyfin is host-networked and not on nas-net — a
+# container name will not resolve, and .local usually does not resolve inside
+# containers either.
+SEERR_JELLYFIN_HOST="${LAN_HOST:-192.168.0.231}"
 SEERR_JELLYFIN_PORT="${SEERR_JELLYFIN_PORT:-8096}"
 
 # Addresses the containers use for each other over nas-net. Not SEERR_URL,
@@ -121,20 +120,11 @@ info() { echo "    $1"; }
 warn() { echo "    WARNING: $1" >&2; }
 fail() { echo "    ERROR: $1" >&2; }
 
-# In the arr apps' bodies secrets travel inside `fields` arrays; in Seerr's they
-# are top-level (`apiKey` on the Sonarr/Radarr settings, `password` on the
-# sign-in), so both shapes are covered. Verbose and dry-run output is the thing
-# most likely to be pasted into a chat or an issue, so it must carry no secrets.
-mask() {
-  printf '%s' "$1" | jq -c '
-    if type == "object" then
-      (if has("fields") then
-         .fields |= map(if (.name // "" | test("password|apiKey"; "i")) then .value = "***" else . end)
-       else . end)
-      | (if has("password") then .password = "***" else . end)
-      | (if has("apiKey") then .apiKey = "***" else . end)
-    else . end' 2>/dev/null || echo '<unprintable>'
-}
+# mask() comes from lib-http.sh, shared with arr-bootstrap.sh and
+# arr-indexers.sh. In the arr apps' bodies secrets travel inside `fields`
+# arrays; in Seerr's they are top-level (`apiKey` on the Sonarr/Radarr
+# settings, `password` on the sign-in) — mask() covers both shapes.
+. ./lib-http.sh
 
 api() {
   # api <method> <path> [json-body]
@@ -318,20 +308,21 @@ wait_for_seerr || exit 1
 read_public_settings
 
 if [ "$SEERR_INITIALIZED" != "true" ]; then
-  jf_user=$(jellyfin_env_get JELLYFIN_ADMIN_USER)
-  jf_pass=$(jellyfin_env_get JELLYFIN_ADMIN_PASSWORD)
+  jf_user="${ADMIN_USER:-}"
+  jf_pass="${ADMIN_PASSWORD:-}"
 
   if [ "$DRY_RUN" -eq 0 ] && { [ -z "$jf_user" ] || [ -z "$jf_pass" ]; }; then
-    fail "no Jellyfin admin credentials in ${JELLYFIN_ENV_FILE}"
-    if [ ! -f "$JELLYFIN_ENV_FILE" ]; then
+    fail "no admin credentials in ${SHARED_ENV_FILE}"
+    if [ ! -f "$SHARED_ENV_FILE" ]; then
       fail "the file does not exist (looked from $(pwd))"
     else
-      [ -z "$jf_user" ] && fail "JELLYFIN_ADMIN_USER is empty or unset"
-      [ -z "$jf_pass" ] && fail "JELLYFIN_ADMIN_PASSWORD is empty or unset"
+      [ -z "$jf_user" ] && fail "ADMIN_USER is empty or unset"
+      [ -z "$jf_pass" ] && fail "ADMIN_PASSWORD is empty or unset"
     fi
     fail "Seerr's admin is created FROM the Jellyfin account, so setup cannot"
-    fail "proceed without it. up.sh prompts for the password only when the"
-    fail "jellyfin tier is selected — 'sudo ./up.sh arr' skips that prompt."
+    fail "proceed without it. up.sh prompts for the password whenever jellyfin"
+    fail "or qbittorrent is selected — 'sudo ./up.sh sonarr radarr prowlarr"
+    fail "seerr' without either of those skips that prompt."
     report_state
     exit 1
   fi
@@ -339,7 +330,7 @@ if [ "$SEERR_INITIALIZED" != "true" ]; then
   wait_for_jellyfin || { report_state; exit 1; }
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    info "[dry-run] POST /api/v1/auth/jellyfin — Jellyfin at ${SEERR_JELLYFIN_HOST}:${SEERR_JELLYFIN_PORT}, creds from ${JELLYFIN_ENV_FILE}"
+    info "[dry-run] POST /api/v1/auth/jellyfin — Jellyfin at ${SEERR_JELLYFIN_HOST}:${SEERR_JELLYFIN_PORT}, creds from ${SHARED_ENV_FILE}"
     info "[dry-run] would sync and enable the Movies/Series libraries"
   else
     # First-ever call creates Seerr's admin (user 1) from this account and stores
@@ -437,12 +428,12 @@ fi
 # a single request, which is not something to report as a successful bring-up.
 WIRING_RC=0
 add_seerr_app() {
-  # add_seerr_app <Name> <path> <host> <port> <api-key> <root> <preferred-profile> <extra-jq>
-  local name="$1" path="$2" host="$3" port="$4" app_key="$5" root="$6" preferred="$7" extra="$8"
+  # add_seerr_app <Name> <path> <host> <port> <api-key> <root> <preferred-profile> <extra-jq> <env-file>
+  local name="$1" path="$2" host="$3" port="$4" app_key="$5" root="$6" preferred="$7" extra="$8" env_file="$9"
   local existing test_out profile_id profile_name body
 
   if [ -z "$app_key" ]; then
-    fail "${name}: no API key in ${ENV_FILE} — run up.sh to generate it"
+    fail "${name}: no API key in ${env_file} — run up.sh to generate it"
     WIRING_RC=1
     return 0
   fi
@@ -460,7 +451,7 @@ add_seerr_app() {
            '{hostname: $h, port: $p, apiKey: $k, useSsl: false, baseUrl: ""}')
   test_out=$(api POST "/api/v1/settings/${path}/test" "$body") || {
     fail "${name}: connection test failed — Seerr could not reach ${host}:${port}."
-    fail "${name}: check the container is up and its key in ${ENV_FILE} is current."
+    fail "${name}: check the container is up and its key in ${env_file} is current."
     WIRING_RC=22; return 0; }
 
   # Prefer the TRaSH profile configarr installs; fall back to the first.
@@ -500,9 +491,9 @@ add_seerr_app() {
 # The extra-jq carries each schema's own required field: enableSeasonFolders is
 # required by SonarrSettings, minimumAvailability by RadarrSettings.
 add_seerr_app Sonarr sonarr "$SONARR_INTERNAL_HOST" "$SONARR_INTERNAL_PORT" \
-  "${SONARR_API_KEY:-}" "$SONARR_ROOT_FOLDER" "WEB-1080p" '.enableSeasonFolders = true'
+  "${SONARR_API_KEY:-}" "$SONARR_ROOT_FOLDER" "WEB-1080p" '.enableSeasonFolders = true' "$SONARR_ENV_FILE"
 add_seerr_app Radarr radarr "$RADARR_INTERNAL_HOST" "$RADARR_INTERNAL_PORT" \
-  "${RADARR_API_KEY:-}" "$RADARR_ROOT_FOLDER" "HD Bluray + WEB" '.minimumAvailability = "released"'
+  "${RADARR_API_KEY:-}" "$RADARR_ROOT_FOLDER" "HD Bluray + WEB" '.minimumAvailability = "released"' "$RADARR_ENV_FILE"
 
 # --- initialize --------------------------------------------------------------
 

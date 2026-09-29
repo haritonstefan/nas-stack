@@ -1,0 +1,40 @@
+services:
+  prowlarr:
+    image: linuxserver/prowlarr:2.5.2.5491-ls156
+    container_name: prowlarr
+    restart: unless-stopped
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-10}
+      UMASK: ${UMASK:-002}
+      TZ: ${TZ:-Europe/Bucharest}
+      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run up.sh to generate it}
+      PROWLARR__AUTH__METHOD: Forms
+      PROWLARR__AUTH__REQUIRED: DisabledForLocalAddresses
+      PROWLARR__LOG__ANALYTICSENABLED: "False"
+    ports:
+      - "${PROWLARR_PORT:-9696}:9696"
+    volumes:
+      - ${PROWLARR_CONFIG_DIR:-/volume2/docker/prowlarr/config}:/config
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=Prowlarr
+      - homepage.icon=prowlarr.png
+      - homepage.href=http://apollo.local:${PROWLARR_PORT:-9696}
+      - homepage.description=Indexer manager
+      - homepage.siteMonitor=http://prowlarr:9696
+      - homepage.widget.type=prowlarr
+      - homepage.widget.url=http://prowlarr:9696
+      - homepage.widget.key=${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run up.sh to generate it}
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

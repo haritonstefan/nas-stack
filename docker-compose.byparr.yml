@@ -1,0 +1,30 @@
+services:
+  # No published port and no homepage labels: internal-only, so a tile would be
+  # a dead end. Registered as Prowlarr's indexer proxy by arr-indexers.sh;
+  # Prowlarr calls it only when a Cloudflare challenge is detected on a tagged
+  # indexer. Speaks the FlareSolverr /v1 API (GET-only — request.post is
+  # accepted but treated as a GET; fine here, the CF-protected trackers all
+  # search via GET). Image ships its own /health-based HEALTHCHECK.
+  byparr:
+    # v3.0.3 (commit 9afb3e0) — upstream publishes no versioned image tags, so
+    # the exact-version pin is by digest of :latest at the release commit.
+    image: ghcr.io/thephaseless/byparr@sha256:db931cd7b7880a454bf7d12640155dbb57386088629811ecf452f7626be49e3c
+    container_name: byparr
+    restart: unless-stopped
+    # Firefox/Camoufox needs more than Docker's 64 MB /dev/shm default;
+    # upstream's guidance is 512 MB.
+    shm_size: 512mb
+    environment:
+      TZ: ${TZ:-Europe/Bucharest}
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true
