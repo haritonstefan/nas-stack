@@ -1,11 +1,9 @@
 # Configarr — TRaSH quality profiles and custom formats for Sonarr and Radarr.
 #
-# up.sh installs this into CONFIGARR_CONFIG_DIR only when absent, so on-NAS
-# edits survive. There are no placeholder tokens to substitute: the API keys
-# arrive as environment variables — from sonarr.env/radarr.env, passed as
-# extra --env-file flags for this unit (see docker-compose.configarr.yml) —
-# and !env resolves them at run time. An unset variable is a hard error, not
-# an empty string.
+# nas install installs this into CONFIGARR_CONFIG_DIR only when absent, so on-NAS
+# edits survive. The API keys arrive as environment variables (see
+# configarr.env.example for how they get there); !env resolves them at run
+# time, and an unset variable is a hard error, not an empty string.
 
 trashGuideUrl: https://github.com/TRaSH-Guides/Guides
 recyclarrConfigUrl: https://github.com/recyclarr/config-templates
@@ -62,7 +60,7 @@ radarr:
 #                           (removeCompletedDownloads=true, paired with
 #                           ShareLimitAction=Stop in qBittorrent.conf), and
 #                           configarr would also rewrite the qBittorrent
-#                           password, which up.sh seeds as a PBKDF2 hash.
+#                           password, which nas install seeds as a PBKDF2 hash.
 #   delay_profiles        - deletes any profile not listed here.
 #   media_naming          - would rename the existing library, which keeps its
 #                           capitalised, non-TRaSH layout on purpose.

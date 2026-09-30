@@ -35,8 +35,8 @@ services:
       # nas-net, and neither container names nor .local resolve from inside a
       # container.
       # JELLYFIN_API_KEY and JELLYFIN_SCAN_TASK_ID are minted by
-      # jellyfin-bootstrap.sh (not up.sh), so they are legitimately empty on
-      # the first bring-up — up.sh recreates this container once the bootstrap
+      # jellyfin-bootstrap.sh (not the CLI), so they are legitimately empty on
+      # the first bring-up — nas post-install recreates this container once the bootstrap
       # has written them, because labels are baked in at container create.
       - homepage.siteMonitor=http://${LAN_HOST:-192.168.0.231}:8096
       - homepage.widgets[0].type=jellyfin

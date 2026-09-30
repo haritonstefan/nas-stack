@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
-# Configures a fresh Jellyfin instance over the API: server name, admin user,
-# libraries, Intel QSV hardware transcoding, the DLNA plugin, and the network
-# settings (LAN subnets, no known proxies, empty base URL). Idempotent — safe
-# to re-run.
+# Configures Jellyfin over the API: server name, admin user, libraries, Intel
+# QSV hardware transcoding, the DLNA plugin, the network settings (LAN
+# subnets, no known proxies, empty base URL), and the Homepage widget
+# credentials (API key + scan-task id, minted server-side and written back to
+# jellyfin.env). Idempotent — safe to re-run; every step skips what is already
+# configured, and on an already-configured server the wizard steps are skipped.
 #
-# Run AFTER `docker compose ... up -d` on a fresh (never-configured) Jellyfin.
-# The /Startup/* endpoints are only reachable while the wizard is incomplete,
-# so this must run before anyone finishes the wizard in a browser.
+# Run AFTER `docker compose ... up -d`. The wizard is ONE-SHOT: the /Startup/*
+# endpoints are only reachable while it is incomplete, and POST
+# /Startup/Complete closes them forever — so on a fresh Jellyfin this must run
+# before anyone finishes the wizard in a browser.
 #
 #   ./jellyfin-bootstrap.sh
 #   ./jellyfin-bootstrap.sh --dry-run
 #   JELLYFIN_URL=http://apollo.local:8096 ./jellyfin-bootstrap.sh
 #
-# Requires: curl, jq. Reads shared.env (for ADMIN_USER/ADMIN_PASSWORD, the
-# identity also used by qBittorrent's WebUI) and jellyfin.env if present.
+# Flags:
+#   --dry-run     print the requests (bodies masked) without sending anything
+#   --verbose     log every request, status and response body, secrets masked
+#   --scan-only   authenticate and trigger a library scan, nothing else — run
+#                 by nas post-install after every bootstrap when JELLYFIN_SCAN_ON_BOOTSTRAP=1
+#
+# Requires: curl, jq. Reads shared.env (ADMIN_USER/ADMIN_PASSWORD, the shared
+# identity) and jellyfin.env (override with ENV_FILE=<file>).
+#
+# Exit codes: 0 success.
+#             1 precondition failure (unreachable server, missing credentials).
+#             10 success, but a restart is required to apply the changes —
+#                nas post-install restarts the container and then triggers the scan.
+#             22 an API call returned a non-2xx.
 
 set -euo pipefail
 
@@ -24,9 +39,13 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run)      DRY_RUN=1 ;;
     -v|--verbose)   VERBOSE=1 ;;
-    # Authenticate and trigger a library scan, nothing else. Used by up.sh
-    # after the restart, when a base URL had to be cleared.
     --scan-only)    SCAN_ONLY=1 ;;
+    -h|--help)
+      # Print the header block: every comment line after the shebang, stopping
+      # at the first non-comment. Self-adjusting, so editing the header above
+      # cannot silently truncate --help.
+      sed -n '2,${/^#/!q; s/^# \{0,1\}//p;}' "$0"
+      exit 0 ;;
     *) echo "Unknown argument: ${arg}" >&2
        echo "Usage: ./jellyfin-bootstrap.sh [--dry-run] [--verbose] [--scan-only]" >&2
        exit 1 ;;
@@ -44,7 +63,7 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-JELLYFIN_URL="${JELLYFIN_URL:-http://apollo.local:8096}"
+JELLYFIN_URL="${JELLYFIN_URL:-http://127.0.0.1:8096}"
 JELLYFIN_SERVER_NAME="${JELLYFIN_SERVER_NAME:-Apollo}"
 # The shared identity (shared.env), not a Jellyfin-only credential — qBittorrent's
 # WebUI and Seerr's sign-in ride the same account.
@@ -62,7 +81,7 @@ for cmd in curl jq; do
 done
 
 if [ "$DRY_RUN" -eq 0 ] && [ -z "${JELLYFIN_ADMIN_PASSWORD:-}" ]; then
-  echo "ERROR: ADMIN_PASSWORD is not set (put it in shared.env, or run up.sh" >&2
+  echo "ERROR: ADMIN_PASSWORD is not set (put it in shared.env, or run nas configure" >&2
   echo "       which prompts for it)." >&2
   exit 1
 fi
@@ -72,11 +91,16 @@ TOKEN=""
 
 urlencode() { printf '%s' "$1" | jq -sRr @uri; }
 
+mask() {
+  # Jellyfin bodies are PascalCase, so lib/http.sh's mask() (lowercase
+  # password/apiKey) would not catch Password here.
+  printf '%s' "$1" | jq -c '(.Password? // empty) |= "***"' 2>/dev/null || echo '<unprintable>'
+}
+
 api() {
   # api <method> <path> [json-body]
   local method="$1" path="$2" body="${3:-}"
-  # No -f: it discards the response body on HTTP errors, which is exactly where
-  # Jellyfin explains itself. Status is captured separately instead.
+  # No -f: it discards the error body, which is exactly where Jellyfin explains itself.
   local -a args=(-sS -X "$method" "${JELLYFIN_URL}${path}" -H 'Content-Type: application/json')
 
   # Jellyfin wants the token inside the MediaBrowser authorization scheme.
@@ -87,15 +111,15 @@ api() {
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "    [dry-run] ${method} ${path}" >&2
-    [ -n "$body" ] && printf '%s\n' "$body" | jq -c . | sed 's/^/              /' >&2
+    # Masked: a dry run is the output most likely to be pasted somewhere public.
+    [ -n "$body" ] && printf '%s\n' "$(mask "$body")" | sed 's/^/              /' >&2
     echo '{}'
     return 0
   fi
 
   if [ "$VERBOSE" -eq 1 ]; then
     echo "    --> ${method} ${JELLYFIN_URL}${path}" >&2
-    [ -n "$body" ] && printf '        body: %s\n' \
-      "$(printf '%s' "$body" | jq -c '(.Password? // empty) |= "***"' 2>/dev/null || echo '<unprintable>')" >&2
+    [ -n "$body" ] && printf '        body: %s\n' "$(mask "$body")" >&2
   fi
 
   # Append the status as a trailing line so body and code come back together.
@@ -114,13 +138,9 @@ api() {
     2*) printf '%s' "$out"; return 0 ;;
   esac
 
-  # A failing status is the whole point of the exercise — print what the server
-  # actually said, not just the number.
+  # A failing status is the point — print what the server said, not just the number.
   echo "ERROR: ${method} ${JELLYFIN_URL}${path} returned HTTP ${status}" >&2
-  if [ -n "$body" ]; then
-    printf '       sent: %s\n' \
-      "$(printf '%s' "$body" | jq -c '(.Password? // empty) |= "***"' 2>/dev/null || printf '%s' "$body")" >&2
-  fi
+  [ -n "$body" ] && printf '       sent: %s\n' "$(mask "$body")" >&2
   if [ -n "$out" ]; then
     printf '       said: %s\n' "$(printf '%s' "$out" | head -c 500)" >&2
   else
@@ -234,7 +254,7 @@ ERROR: could not authenticate as "${JELLYFIN_ADMIN_USER}".
      Jellyfin version. Reset and retry:
        docker compose -p nas-jellyfin --env-file shared.env --env-file ${ENV_FILE} -f docker-compose.jellyfin.yml down
        rm -rf ${JELLYFIN_CONFIG_DIR:-/volume2/docker/jellyfin/config}/*
-       sudo ./up.sh jellyfin
+       sudo ./nas recreate jellyfin
 
   Server said: $(printf '%s' "$AUTH_JSON" | head -c 200)
 EOF
@@ -253,14 +273,11 @@ if [ "$SCAN_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# Homepage's Jellyfin widget authenticates with a server-minted API key
-# (Dashboard -> API Keys), and its scan-status widget polls the "Scan media
-# library" scheduled task by id. Neither value can be seeded via the
-# environment — the key lives in Jellyfin's database, the id is derived from
-# the task's type name — so both are read here, post-auth, and written back to
-# jellyfin.env for docker compose to inject as container labels. up.sh
-# recreates the container when the labels lag the file (a plain restart keeps
-# the old ones). Idempotent: the key is matched by AppName on re-runs.
+# The Homepage widget's API key and scan-task id cannot be env-seeded (the key
+# lives in Jellyfin's database), so both are read post-auth and written back to
+# jellyfin.env, where compose injects them as container labels. Labels are
+# baked in at container create — nas post-install recreates the container when they lag
+# the file, since a plain restart keeps the old ones.
 persist_env() { # persist_env <VAR> <value> — write back to $ENV_FILE
   local var="$1" value="$2"
   if [ ! -f "$ENV_FILE" ]; then
@@ -373,7 +390,7 @@ if [ "${JELLYFIN_INSTALL_DLNA:-1}" = "1" ]; then
   # DLNA is a plugin as of 10.10, not core. Jellyfin does not hot-load plugins:
   # a freshly installed one sits at status "Restart" until the process comes
   # back. So nothing here restarts mid-run — the work is folded into the same
-  # deferred restart the base URL already uses (exit 10), which up.sh performs
+  # deferred restart the base URL already uses (exit 10), which nas post-install performs
   # before the library scan.
   #
   # Every call below is non-fatal on purpose: `api` returns 22 under `set -e`,
@@ -408,7 +425,7 @@ if [ "${JELLYFIN_INSTALL_DLNA:-1}" = "1" ]; then
         Restart)
           # Only "Restart" justifies asking for another bounce. If the plugin is
           # still saying this *after* a restart it will never load, and silently
-          # re-requesting would bounce Jellyfin on every up.sh run forever.
+          # re-requesting would bounce Jellyfin on every bootstrap run forever.
           echo "    ${name}: installed, awaiting restart"
           dlna_warn "if ${name} still reports \"Restart\" after a restart, it is"
           dlna_warn "failing to load — check docker logs jellyfin."
@@ -531,9 +548,7 @@ NEW_NET=$(printf '%s' "$NET" | jq \
   --argjson subnets "$DESIRED_SUBNETS" \
   '.LocalNetworkSubnets = $subnets | .KnownProxies = [] | .BaseUrl = ""')
 
-# UNVERIFIED: if Jellyfin normalizes LocalNetworkSubnets on write this never
-# matches, and every up.sh run then restarts and rescans the HDD. Confirm by
-# running up.sh twice — the second must say "already correct, skipping".
+# UNVERIFIED: if Jellyfin normalizes LocalNetworkSubnets on write this never matches and every run restarts + rescans (verify on the NAS).
 if [ "$CURRENT_BASE" = "" ] \
    && [ "$CURRENT_SUBNETS" = "$DESIRED_SUBNETS" ] \
    && [ "$CURRENT_PROXIES" = "[]" ]; then
@@ -557,7 +572,7 @@ if [ "${RESTART_NEEDED}" -eq 1 ]; then
   cat <<EOF
     A restart is needed to apply the changes above:
       docker restart jellyfin
-    (up.sh does this for you, then triggers the library scan.)
+    (nas post-install does this for you, then triggers the library scan.)
 EOF
 fi
 cat <<EOF
@@ -565,7 +580,7 @@ cat <<EOF
       (also on the LAN as http://apollo.local:8096)
 EOF
 
-# Exit 10 = success, and a restart is required. Lets up.sh restart only when
+# Exit 10 = success, and a restart is required. Lets the CLI restart only when
 # something actually changed, instead of bouncing the container on every re-run.
 [ "${RESTART_NEEDED}" -eq 1 ] && exit 10
 exit 0

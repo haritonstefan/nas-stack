@@ -8,7 +8,7 @@ services:
       PGID: ${PGID:-10}
       UMASK: ${UMASK:-002}
       TZ: ${TZ:-Europe/Bucharest}
-      RADARR__AUTH__APIKEY: ${RADARR_API_KEY:?RADARR_API_KEY is unset — run up.sh to generate it}
+      RADARR__AUTH__APIKEY: ${RADARR_API_KEY:?RADARR_API_KEY is unset — run nas install to generate it}
       RADARR__AUTH__METHOD: Forms
       RADARR__AUTH__REQUIRED: DisabledForLocalAddresses
       RADARR__LOG__ANALYTICSENABLED: "False"
@@ -36,7 +36,7 @@ services:
       - homepage.siteMonitor=http://radarr:7878
       - homepage.widget.type=radarr
       - homepage.widget.url=http://radarr:7878
-      - homepage.widget.key=${RADARR_API_KEY:?RADARR_API_KEY is unset — run up.sh to generate it}
+      - homepage.widget.key=${RADARR_API_KEY:?RADARR_API_KEY is unset — run nas install to generate it}
       - homepage.widget.enableQueue=true
 
 networks:

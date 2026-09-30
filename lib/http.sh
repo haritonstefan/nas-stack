@@ -1,7 +1,6 @@
 # Shared by arr-bootstrap.sh, seerr-bootstrap.sh, arr-indexers.sh: sourced,
-# not run directly. Depends on the sourcing script already having defined
-# info() and DRY_RUN before mask()/wait_for() are actually called (their
-# definitions here don't need either yet).
+# not run directly. The sourcing script must define info() and DRY_RUN before
+# mask()/wait_for() are called.
 
 mask() {
   # Redacts credential-shaped fields before a value is ever printed (dry-run,

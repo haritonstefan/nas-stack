@@ -1,0 +1,54 @@
+services:
+  lidarr:
+    image: linuxserver/lidarr:3.1.0.4875-ls42
+    container_name: lidarr
+    restart: unless-stopped
+    # LinuxServer.io images take identity as environment and usermod internally,
+    # unlike Homepage and Jellyfin which set `user:`. Neither touches the docker
+    # socket, so an inspectable identity is not needed here. See spec section 8.
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-10}
+      UMASK: ${UMASK:-002}
+      TZ: ${TZ:-Europe/Bucharest}
+      # Read at every start and never persisted to config.xml. Losing
+      # lidarr.env mints a new key silently. See spec section 8.
+      LIDARR__AUTH__APIKEY: ${LIDARR_API_KEY:?LIDARR_API_KEY is unset — run nas install to generate it}
+      LIDARR__AUTH__METHOD: Forms
+      LIDARR__AUTH__REQUIRED: DisabledForLocalAddresses
+      LIDARR__LOG__ANALYTICSENABLED: "False"
+    ports:
+      - "${LIDARR_PORT:-8686}:8686"
+    volumes:
+      - ${LIDARR_CONFIG_DIR:-/volume2/docker/lidarr/config}:/config
+      # rw — imports write here. Jellyfin mounts the same host path :ro.
+      - ${ARR_MUSIC_DIR:-/volume1/Media/Music}:/media/music
+      # Identical container path in the arr apps and qbittorrent: qBittorrent
+      # reports absolute paths, so a mismatch fails every import. Shared via
+      # DOWNLOADS_DIR in shared.env, not a per-service value.
+      - ${DOWNLOADS_DIR:-/volume2/docker/downloads}:/downloads
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=Lidarr
+      - homepage.icon=lidarr.png
+      - homepage.href=http://apollo.local:${LIDARR_PORT:-8686}
+      - homepage.description=Music
+      # siteMonitor is probed by the Homepage container itself, so container
+      # names over nas-net — same resolution rule as widget.url below.
+      - homepage.siteMonitor=http://lidarr:8686
+      - homepage.widget.type=lidarr
+      # href is resolved by the browser, widget.url by the Homepage container.
+      - homepage.widget.url=http://lidarr:8686
+      - homepage.widget.key=${LIDARR_API_KEY:?LIDARR_API_KEY is unset — run nas install to generate it}
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

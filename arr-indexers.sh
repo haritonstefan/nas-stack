@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Adds the torrent trackers to Prowlarr: the 'byparr' tag, the Byparr indexer
-# proxy (registered under the FlareSolverr implementation — it speaks that
-# API), the public indexers from ARR_INDEXERS, and the private ones from
+# proxy, the public indexers from ARR_INDEXERS, and the private ones from
 # ARR_INDEXERS_PRIVATE with credentials from ARR_INDEXER_<NAME>_USER / _PASS
 # (<NAME> is the definition name uppercased) — see prowlarr.env.example.
 # Idempotent — safe to re-run.
 #
-# Run AFTER `sudo ./up.sh`: it only talks to Prowlarr and skips anything
+# Run AFTER `sudo ./nas install`: it only talks to Prowlarr and skips anything
 # already configured. Split out of arr-bootstrap.sh so tracker wiring can be
 # run — and re-run when a tracker was down or a definition missing — without
 # repeating the whole stack bring-up.
@@ -82,7 +81,7 @@ fi
 
 PROWLARR_URL="${PROWLARR_URL:-http://127.0.0.1:9696}"
 
-# Still honored here (configure.sh stages it): 0 skips the indexers section,
+# Still honored here (nas configure stages it): 0 skips the indexers section,
 # leaving Prowlarr empty for hand-adding. The Byparr proxy is set up regardless.
 ARR_INSTALL_INDEXERS="${ARR_INSTALL_INDEXERS:-1}"
 ARR_INDEXERS="${ARR_INDEXERS:-1337x,thepiratebay,yts,eztv,limetorrents,torlock,therarbg,knaben,glodls,magnetdl}"
@@ -98,7 +97,7 @@ for cmd in curl jq; do
 done
 
 if [ "$DRY_RUN" -eq 0 ] && [ -z "${PROWLARR_API_KEY:-}" ]; then
-  echo "ERROR: PROWLARR_API_KEY is not set (put it in ${ENV_FILE}, or run up.sh" >&2
+  echo "ERROR: PROWLARR_API_KEY is not set (put it in ${ENV_FILE}, or run nas install" >&2
   echo "       which generates it). Prowlarr cannot be configured without it." >&2
   exit 1
 fi
@@ -113,16 +112,14 @@ api() {
   # stdout is the response body only; all logging goes to stderr, so
   #   X=$(api ...) works and `api ... >/dev/null` stays quiet.
   local method="$1" path="$2" body="${3:-}"
-  # No -f: it discards the response body on HTTP errors, which is exactly where
-  # Prowlarr puts its validation messages. Status is captured separately.
+  # No -f: it discards the error body, which is exactly where Prowlarr explains itself.
   local -a args=(-sS -X "$method" "${PROWLARR_URL}${path}"
                  -H 'Content-Type: application/json' -H "X-Api-Key: ${PROWLARR_API_KEY}")
   [ -n "$body" ] && args+=(-d "$body")
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "    [dry-run] ${method} ${PROWLARR_URL}${path}" >&2
-    # Masked like the verbose and error paths: a dry run is the thing most likely
-    # to be pasted into a chat or an issue, so it must not carry the credentials.
+    # Masked: a dry run is the output most likely to be pasted somewhere public.
     [ -n "$body" ] && printf '%s\n' "$(mask "$body")" | sed 's/^/              /' >&2
     echo '{}'
     return 0
@@ -149,8 +146,7 @@ api() {
     2*) printf '%s' "$out"; return 0 ;;
   esac
 
-  # A failing status is the whole point of the exercise — print what the server
-  # actually said, not just the number.
+  # A failing status is the point — print what the server said, not just the number.
   echo "ERROR: ${method} ${PROWLARR_URL}${path} returned HTTP ${status}" >&2
   [ -n "$body" ] && printf '       sent: %s\n' "$(mask "$body")" >&2
   if [ -n "$out" ]; then
@@ -162,7 +158,7 @@ api() {
 }
 
 # mask() and wait_for() — shared with arr-bootstrap.sh and seerr-bootstrap.sh.
-. ./lib-http.sh
+. ./lib/http.sh
 
 if [ "$DRY_RUN" -eq 1 ]; then
   say "DRY RUN — no requests will be sent"
@@ -198,9 +194,8 @@ say "Registering Byparr as Prowlarr's indexer proxy"
 # Prowlarr routes a request through the proxy only when it detects a Cloudflare
 # challenge AND the indexer shares a tag with the proxy — so tagging every
 # indexer costs nothing on unprotected trackers and future-proofs any that add
-# Cloudflare later. Byparr is registered under the FlareSolverr implementation:
-# it speaks that API. It is GET-only — Prowlarr's request.post degrades to a
-# GET — acceptable because the Cloudflare-protected trackers here search via GET.
+# Cloudflare later. Byparr specifics (FlareSolverr implementation, GET-only)
+# live in docker-compose.byparr.yml.
 #
 # Non-fatal throughout, like the indexers: a solver that cannot be registered
 # must not abort the run.

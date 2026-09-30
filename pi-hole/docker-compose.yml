@@ -1,0 +1,35 @@
+services:
+  pihole:
+    image: pihole/pihole:2025.08.0
+    container_name: pihole
+    hostname: pihole
+    restart: unless-stopped
+    networks:
+      pihole_macvlan:
+        ipv4_address: ${PIHOLE_IP:-192.168.0.53}
+    # Resolve through itself once FTL is up; fallback so the container
+    # can still pull blocklists before FTL finishes starting.
+    dns:
+      - 127.0.0.1
+      - 1.1.1.1
+    environment:
+      TZ: ${TZ:-Europe/Bucharest}
+      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?PIHOLE_PASSWORD must be set in pi-hole/.env}
+      FTLCONF_dns_upstreams: ${PIHOLE_UPSTREAMS:-1.1.1.1;1.0.0.1}
+    volumes:
+      - ${PIHOLE_CONFIG_DIR:-./etc-pihole}:/etc/pihole
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  pihole_macvlan:
+    driver: macvlan
+    driver_opts:
+      parent: ${MACVLAN_PARENT:-bridge0}
+    ipam:
+      config:
+        - subnet: ${LAN_SUBNET:-192.168.0.0/24}
+          gateway: ${LAN_GATEWAY:-192.168.0.1}

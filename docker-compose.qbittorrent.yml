@@ -38,7 +38,7 @@ services:
       # The single shared identity (shared.env), not a qBittorrent-only
       # credential — see shared.env.example.
       - homepage.widget.username=${ADMIN_USER:-admin}
-      - homepage.widget.password=${ADMIN_PASSWORD:?ADMIN_PASSWORD is unset — run up.sh to set it}
+      - homepage.widget.password=${ADMIN_PASSWORD:?ADMIN_PASSWORD is unset — run nas configure to set it}
 
 networks:
   nas-net:

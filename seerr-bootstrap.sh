@@ -25,8 +25,7 @@
 #   seerr.env    — SEERR_API_KEY, SEERR_JELLYFIN_PORT, SEERR_CONFIGURE
 #   sonarr.env   — SONARR_API_KEY, SONARR_ROOT_FOLDER
 #   radarr.env   — RADARR_API_KEY, RADARR_ROOT_FOLDER
-# None of these share a variable name, so — unlike the old arr.env/
-# jellyfin.env split — they are sourced directly, no isolating subshell needed.
+# None of these share a variable name, so they are sourced directly.
 #
 # Exit codes: 0 success, or a deliberate skip via SEERR_CONFIGURE=0.
 #             1 precondition failure (missing credentials, unreachable service).
@@ -93,14 +92,10 @@ SEERR_URL="${SEERR_URL:-http://127.0.0.1:5055}"
 SONARR_ROOT_FOLDER="${SONARR_ROOT_FOLDER:-/media/series}"
 RADARR_ROOT_FOLDER="${RADARR_ROOT_FOLDER:-/media/movies}"
 
-# Renamed from ARR_CONFIGURE_SEERR when this moved out of arr-bootstrap.sh; the
-# old name is still honoured so an existing env file keeps working.
+# The old name ARR_CONFIGURE_SEERR is still honoured so existing env files keep working.
 SEERR_CONFIGURE="${SEERR_CONFIGURE:-${ARR_CONFIGURE_SEERR:-1}}"
 
-# Jellyfin as Seerr must reach it: the host LAN address (shared.env's
-# LAN_HOST), because Jellyfin is host-networked and not on nas-net — a
-# container name will not resolve, and .local usually does not resolve inside
-# containers either.
+# The host LAN address: Jellyfin is host-networked, off nas-net (see the spec).
 SEERR_JELLYFIN_HOST="${LAN_HOST:-192.168.0.231}"
 SEERR_JELLYFIN_PORT="${SEERR_JELLYFIN_PORT:-8096}"
 
@@ -120,11 +115,11 @@ info() { echo "    $1"; }
 warn() { echo "    WARNING: $1" >&2; }
 fail() { echo "    ERROR: $1" >&2; }
 
-# mask() comes from lib-http.sh, shared with arr-bootstrap.sh and
+# mask() comes from lib/http.sh, shared with arr-bootstrap.sh and
 # arr-indexers.sh. In the arr apps' bodies secrets travel inside `fields`
 # arrays; in Seerr's they are top-level (`apiKey` on the Sonarr/Radarr
 # settings, `password` on the sign-in) — mask() covers both shapes.
-. ./lib-http.sh
+. ./lib/http.sh
 
 api() {
   # api <method> <path> [json-body]
@@ -132,16 +127,14 @@ api() {
   #   X=$(api ...) works and `api ... >/dev/null` stays quiet.
   local method="$1" path="$2" body="${3:-}"
   local base="$SEERR_URL"
-  # No -f: it discards the response body on HTTP errors, which is exactly where
-  # Seerr puts its error messages. Status is captured separately.
+  # No -f: it discards the error body, which is exactly where Seerr explains itself.
   local -a args=(-sS -X "$method" "${base}${path}"
                  -H 'Content-Type: application/json' -H "X-Api-Key: ${SEERR_API_KEY}")
   [ -n "$body" ] && args+=(-d "$body")
 
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "    [dry-run] ${method} ${base}${path}" >&2
-    # Masked like the verbose and error paths: a dry run is the thing most likely
-    # to be pasted into a chat or an issue, so it must not carry the API keys.
+    # Masked: a dry run is the output most likely to be pasted somewhere public.
     [ -n "$body" ] && printf '%s\n' "$(mask "$body")" | sed 's/^/              /' >&2
     echo '{}'
     return 0
@@ -168,8 +161,7 @@ api() {
     2*) printf '%s' "$out"; return 0 ;;
   esac
 
-  # A failing status is the whole point of the exercise — print what the server
-  # actually said, not just the number.
+  # A failing status is the point — print what the server said, not just the number.
   echo "ERROR: ${method} ${base}${path} returned HTTP ${status}" >&2
   [ -n "$body" ] && printf '       sent: %s\n' "$(mask "$body")" >&2
   if [ -n "$out" ]; then
@@ -190,7 +182,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 if [ "$DRY_RUN" -eq 0 ] && [ -z "${SEERR_API_KEY:-}" ]; then
-  fail "SEERR_API_KEY is not set (put it in ${ENV_FILE}, or run up.sh which"
+  fail "SEERR_API_KEY is not set (put it in ${ENV_FILE}, or run nas install, which"
   fail "generates it). Seerr cannot be configured without it."
   exit 1
 fi
@@ -241,9 +233,8 @@ user_state() {
   esac
 }
 
-# Printed on every failure path. The whole point of this script's existence:
-# the old code asserted "not a Jellyfin administrator" for any 403, which on a
-# fresh install is flatly false and sends the reader after the wrong cause.
+# Printed on every failure path: report the observed state instead of asserting
+# a cause — a 403 alone cannot distinguish a fresh install from a bad account.
 report_state() {
   read_public_settings
   warn "Seerr state at the time of failure:"
@@ -277,7 +268,7 @@ wait_for_seerr() {
   return 1
 }
 
-# Retried rather than probed once: up.sh restarts Jellyfin on its deferred
+# Retried rather than probed once: nas post-install restarts Jellyfin on its deferred
 # exit-10 path, and a single-shot probe can lose that race and report a
 # perfectly healthy Jellyfin as unreachable.
 wait_for_jellyfin() {
@@ -320,8 +311,8 @@ if [ "$SEERR_INITIALIZED" != "true" ]; then
       [ -z "$jf_pass" ] && fail "ADMIN_PASSWORD is empty or unset"
     fi
     fail "Seerr's admin is created FROM the Jellyfin account, so setup cannot"
-    fail "proceed without it. up.sh prompts for the password whenever jellyfin"
-    fail "or qbittorrent is selected — 'sudo ./up.sh sonarr radarr prowlarr"
+    fail "proceed without it. nas configure asks for the password whenever jellyfin,"
+    fail "qbittorrent or seerr is selected — './nas install sonarr radarr prowlarr"
     fail "seerr' without either of those skips that prompt."
     report_state
     exit 1
@@ -422,10 +413,7 @@ fi
 # Idempotent by name, GET-list-then-skip. Hostnames are container names: this
 # traffic stays on nas-net, unlike SEERR_URL which is a host-side address.
 #
-# A failure here does not abort — the other app is still worth attempting, and
-# initialize still needs to run so the setup is not left half-open — but it does
-# have to reach the exit code. A Seerr with no download apps wired cannot fulfil
-# a single request, which is not something to report as a successful bring-up.
+# A failure here does not abort, but owns the exit code — see the header.
 WIRING_RC=0
 add_seerr_app() {
   # add_seerr_app <Name> <path> <host> <port> <api-key> <root> <preferred-profile> <extra-jq> <env-file>
@@ -433,7 +421,7 @@ add_seerr_app() {
   local existing test_out profile_id profile_name body
 
   if [ -z "$app_key" ]; then
-    fail "${name}: no API key in ${env_file} — run up.sh to generate it"
+    fail "${name}: no API key in ${env_file} — run nas install to generate it"
     WIRING_RC=1
     return 0
   fi
@@ -512,9 +500,6 @@ else
   info "already initialized"
 fi
 
-# initialize deliberately ran even if the wiring failed — leaving setup open is
-# worse than leaving it incomplete, and the wiring is fixable in place by a
-# re-run. But the failure still owns the exit code.
 if [ "$WIRING_RC" -ne 0 ]; then
   say "Done, with errors"
   fail "Seerr is initialized but not fully wired — it cannot fulfil requests"

@@ -3,7 +3,7 @@
 # `homepage.*` labels in their own compose file instead, so the tile lives with
 # the service definition.
 #
-# Copied to the Homepage config dir by up.sh only if not already present, so
+# Copied to the Homepage config dir by nas install only if not already present, so
 # local edits survive. Edit it there, not here, once running.
 
 - NAS:

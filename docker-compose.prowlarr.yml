@@ -8,7 +8,7 @@ services:
       PGID: ${PGID:-10}
       UMASK: ${UMASK:-002}
       TZ: ${TZ:-Europe/Bucharest}
-      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run up.sh to generate it}
+      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run nas install to generate it}
       PROWLARR__AUTH__METHOD: Forms
       PROWLARR__AUTH__REQUIRED: DisabledForLocalAddresses
       PROWLARR__LOG__ANALYTICSENABLED: "False"
@@ -32,7 +32,7 @@ services:
       - homepage.siteMonitor=http://prowlarr:9696
       - homepage.widget.type=prowlarr
       - homepage.widget.url=http://prowlarr:9696
-      - homepage.widget.key=${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run up.sh to generate it}
+      - homepage.widget.key=${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset — run nas install to generate it}
 
 networks:
   nas-net:

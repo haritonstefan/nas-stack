@@ -7,9 +7,8 @@ services:
   # a primary GID matching the socket's group, which survives a privilege drop
   # and needs no DAC_OVERRIDE. :ro restricts nothing about the API.
   #
-  # job-run only *starts* an existing container by name — it never creates
-  # one. up.sh/down.sh must ensure the configarr container exists (created,
-  # not started) as a side effect of dispatching this unit.
+  # job-run starts an existing container and never creates one — the coupling
+  # with the configarr unit is explained in ofelia.ini.
   ofelia:
     image: mcuadros/ofelia:0.3.22
     container_name: ofelia

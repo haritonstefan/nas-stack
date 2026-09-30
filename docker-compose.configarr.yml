@@ -1,20 +1,10 @@
 services:
-  # Applies the TRaSH quality profiles and custom formats. Run to completion,
-  # not a daemon: the ofelia unit starts it on a schedule, and arr-bootstrap.sh
-  # runs the first sync at bring-up. No published port and no homepage labels,
-  # for the same reason as byparr.
+  # TRaSH quality profiles and custom formats for Sonarr and Radarr. Run to
+  # completion, not a daemon: the ofelia unit starts it on a schedule.
   #
-  # `profiles:` keeps it out of a plain `up -d`. There is no depends_on between
-  # units, so an auto-started sync would race Sonarr and Radarr's startup and,
-  # with STOP_ON_ERROR set, fail at every bring-up. Naming the service
-  # explicitly on the command line enables its profile, so no --profile flag is
-  # needed. up.sh creates the container with `up -d --no-start configarr`,
-  # which is what gives the ofelia unit something to start; ad-hoc runs pass
-  # their own --name.
-  #
-  # SONARR_API_KEY / RADARR_API_KEY do NOT live in configarr.env — up.sh/
-  # down.sh pass sonarr.env and radarr.env as extra --env-file flags for this
-  # unit specifically, so a rotated key can never go stale in a second copy.
+  # `profiles:` keeps it out of a plain `up -d` — with no depends_on between
+  # units, an auto-started sync would race Sonarr/Radarr's startup and fail at
+  # every bring-up. Naming the service on the command line enables the profile.
   configarr:
     image: ghcr.io/raydak-labs/configarr:1.30.2
     container_name: configarr
@@ -26,17 +16,14 @@ services:
     user: "${PUID:-1000}:${PGID:-10}"
     environment:
       TZ: ${TZ:-Europe/Bucharest}
-      # Configarr otherwise exits 0 even when an instance fails: the per-instance
-      # error is counted and the run continues. Both of these turn a silent
-      # partial failure into a non-zero exit that the ofelia unit reports as a
-      # failed job.
+      # Configarr otherwise exits 0 even when an instance fails; these turn a
+      # silent partial failure into a non-zero exit ofelia reports as a failed job.
       STOP_ON_ERROR: "true"
       CONFIGARR_ENFORCE_CONFIG_VALIDATION: "true"
-      # Read by !env in config.yml. URLs are not passed: they are hardcoded to
-      # container addresses there, because SONARR_URL/RADARR_URL in sonarr.env/
-      # radarr.env are host addresses meant for the bootstraps' own curl calls.
-      SONARR_API_KEY: ${SONARR_API_KEY:?SONARR_API_KEY is unset — run up.sh to generate it}
-      RADARR_API_KEY: ${RADARR_API_KEY:?RADARR_API_KEY is unset — run up.sh to generate it}
+      # Arrive via extra --env-file flags (sonarr.env / radarr.env) — the
+      # reasoning is in configarr.env.example. Read by !env in config.yml.
+      SONARR_API_KEY: ${SONARR_API_KEY:?SONARR_API_KEY is unset — run nas install to generate it}
+      RADARR_API_KEY: ${RADARR_API_KEY:?RADARR_API_KEY is unset — run nas install to generate it}
     volumes:
       - ${CONFIGARR_CONFIG_DIR:-/volume2/docker/configarr/config}:/app/config
       - ${CONFIGARR_REPOS_DIR:-/volume2/docker/configarr/repos}:/app/repos

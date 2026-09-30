@@ -1,8 +1,8 @@
-# Header widgets (top of the dashboard). Installed by up.sh only when absent,
+# Header widgets (top of the dashboard). Installed by nas install only when absent,
 # so on-NAS edits survive — edit it there, not here, once running.
 #
 # Disk paths are CONTAINER paths — /volume1 and /volume2 are bind-mounted :ro
-# into the homepage container for exactly this widget (docker-compose.core.yml).
+# into the homepage container for exactly this widget (docker-compose.homepage.yml).
 
 - search:
     provider: duckduckgo

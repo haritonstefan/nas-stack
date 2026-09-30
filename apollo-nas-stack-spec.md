@@ -31,11 +31,12 @@ tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 | 1900/udp | Jellyfin DLNA / SSDP |
 | 8989 | Sonarr |
 | 7878 | Radarr |
+| 8686 | Lidarr |
 | 9696 | Prowlarr |
 | 8080 | qBittorrent web UI |
 | 6881 tcp+udp | qBittorrent torrent traffic |
 | 5055 | Seerr |
-| 53 | PiHole (planned) |
+| — | PiHole claims no host port: macvlan gives it its own LAN IP (`192.168.0.53`, see `docs/pihole-spec.md`) |
 
 Publishing ports is the design. Every user-facing service claims a host port and is linked
 from a dashboard tile.
@@ -76,19 +77,19 @@ container. **That is a different architecture, not an incremental change.**
 
 ## 4. Network topology
 
-One user-defined bridge network, `nas-net`, created and removed directly by `up.sh`/`down.sh`
-(`docker network create/rm`) — no compose file owns it. Every unit's compose file, including
-Homepage's, joins it as `external: true`.
+One user-defined bridge network, `nas-net`, created and removed directly by the CLI
+(`nas install` / `nas destroy`, plain `docker network create/rm`) — no compose file owns it.
+Every unit's compose file, including Homepage's, joins it as `external: true`.
 
 - Services that talk to each other by container name share `nas-net`.
 - Services users reach directly publish a host port.
 - **Jellyfin is the exception**: `network_mode: host`, so it is on no Docker network.
 
-**`nas-net` carries real traffic as of the arr units**, which is what it was provisioned
-for. Prowlarr pushes indexers to `http://sonarr:8989` and `http://radarr:7878`, both reach
-`http://qbittorrent:8080`, and Homepage's widgets poll all four by container name.
+**`nas-net` carries real traffic.** Prowlarr pushes indexers to `http://sonarr:8989`,
+`http://radarr:7878` and `http://lidarr:8686`, all three reach `http://qbittorrent:8080`,
+and Homepage's widgets poll everything by container name.
 
-**Jellyfin is still not on it.** It stays host-networked, so Homepage reads its tile over the
+**Jellyfin is not on it.** It stays host-networked, so Homepage reads its tile over the
 Docker socket rather than the wire. A container-name address that works from Sonarr will not
 work from or to Jellyfin — do not debug a connectivity problem on the assumption that
 everything in the stack shares one network.
@@ -172,8 +173,8 @@ never as separate partial bodies.
 - **Known proxies**: none — nothing proxies Jellyfin, and a stray entry would make
   it trust `X-Forwarded-For` from anyone. Set explicitly to empty rather than left
   at the default.
-- **Base URL**: empty, and settled **last** within that single POST — a non-empty
-  value relocates the entire API under the prefix, so no call may follow it.
+- **Base URL**: empty, settled **last** within that single POST — see "Base URL
+  stays empty" above.
 
 ---
 
@@ -187,14 +188,15 @@ never as separate partial bodies.
 │   └── cache/              # transcode scratch
 ├── sonarr/config/
 ├── radarr/config/
+├── lidarr/config/
 ├── prowlarr/config/
-├── qbittorrent/config/     # qBittorrent.conf, seeded once by up.sh
+├── qbittorrent/config/     # qBittorrent.conf, seeded once by nas install
 ├── seerr/config/           # settings.json + SQLite; users and request history
 ├── configarr/
-│   ├── config/             # config.yml, installed by up.sh when absent
+│   ├── config/             # config.yml, installed by nas install when absent
 │   └── repos/              # cached TRaSH + Recyclarr template clones
 ├── ofelia/config/          # ofelia.ini — the configarr sync schedule
-└── downloads/              # torrents seed from here; NOT deleted by down.sh
+└── downloads/              # torrents seed from here; never a nas destroy target
     ├── incomplete/
     └── complete/
 ```
@@ -203,7 +205,7 @@ never as separate partial bodies.
 /volume1/Media/             # HDD — library root
 ├── Movies/                 # :ro into Jellyfin, rw into Radarr
 ├── Series/                 # :ro into Jellyfin, rw into Sonarr
-└── Music/                  # :ro into Jellyfin
+└── Music/                  # :ro into Jellyfin, rw into Lidarr
 ```
 
 Config on the **SSD**; nothing that spins up the HDD at idle belongs there. Media on the
@@ -220,7 +222,7 @@ is the intended trade:
 - Cost: transient 2× space for the file being imported, one cross-filesystem copy per import,
   and `copyUsingHardlinks` is asserted in Sonarr/Radarr but inert.
 - The SSD would fill without a bound, so qBittorrent stops torrents at ratio 2.0 or 14 days
-  and Sonarr/Radarr then delete them *and their content*. That hand-off is the only thing
+  and the arr apps then delete them *and their content*. That hand-off is the only thing
   draining the tree; see section 8.
 
 The alternative — download tree under `/volume1` next to `Media/` — buys instant hardlinked
@@ -231,7 +233,7 @@ Note this is a deliberate departure from the TRaSH guides' single-`/data`-mount
 recommendation, which exists precisely to make hardlinks work.
 
 Compose files must not hardcode these paths — they come from `shared.env` (for `DOWNLOADS_DIR`,
-which sonarr, radarr and qbittorrent all read identically) or a `<unit>.env` (for a
+which sonarr, radarr, lidarr and qbittorrent all read identically) or a `<unit>.env` (for a
 single-consumer path like `ARR_MOVIES_DIR`), both gitignored, with `shared.env.example` /
 `<unit>.env.example` as the templates.
 
@@ -245,7 +247,7 @@ TARGET   SOURCE                                         FSTYPE
 /volume2 /dev/mapper/ug_A9B5AA_1786551201_pool2-volume1 ext4
 ```
 
-`chattr +C` is a btrfs-only attribute, so there is nothing to disable and `up.sh`
+`chattr +C` is a btrfs-only attribute, so there is nothing to disable and `nas install`
 correctly does not try. `lsattr -d` on the config and cache directories shows only
 `e` (extent mapping), the normal ext4 flag.
 
@@ -267,7 +269,7 @@ dashboard is a derived artifact of the stack definition — adding a service add
 with no dashboard config to maintain. Labels alone suffice; `server` and `container` are
 inferred.
 
-Five config files, installed by `up.sh` only when absent so on-NAS edits survive:
+Five config files, installed by `nas install` only when absent so on-NAS edits survive:
 
 - `docker.yaml` — declares the socket, enabling container status and stats.
 - `services.yaml` — for things that are **not containers on this host** and so cannot be
@@ -319,7 +321,7 @@ When this fails, **no container is listed at all** and Homepage renders only
 `services.yaml` — it looks like one service being ignored, not a dead integration.
 Diagnose by mechanism: `ENOENT` means the path is wrong, `EACCES` means the socket was
 found and refused.
-Homepage is the only externally-reachable service in `core`: pin it, update deliberately.
+Homepage is the front door for every browser on the LAN: pin it, update deliberately.
 
 ---
 
@@ -353,21 +355,28 @@ No routing config, no name registration — publish the port, add the labels.
 
 ### The arr stack as built
 
-Sonarr, Radarr, Prowlarr and qBittorrent, plus Seerr (the request front-end — users sign in
-with their Jellyfin account, request media, and Seerr forwards to Sonarr/Radarr and tracks
-availability), Byparr (no published port, so no tile — the Cloudflare solver, replacing
-FlareSolverr, which stopped clearing modern managed challenges; same API, so Prowlarr
-registers it as a FlareSolverr-type indexer proxy), Configarr (no port, run-to-completion)
-and Ofelia (the scheduler that starts it). Each is its own compose project
-(`docker-compose.<unit>.yml`, `-p nas-<unit>`) — there is no single `arr` compose file, no
-`depends_on`, and no shared volume between them; `arr` survives only as a convenience alias
-`up.sh`/`down.sh`/`configure.sh` expand to all eight. All bridge services on `nas-net`
-(created by `up.sh`, joined as `external: true`); only Jellyfin needs host networking.
+Sonarr, Radarr, Lidarr, Prowlarr and qBittorrent, plus Seerr (the request front-end — users
+sign in with their Jellyfin account, request media, and Seerr forwards to Sonarr/Radarr and
+tracks availability), Byparr (no published port, so no tile — the Cloudflare solver,
+replacing FlareSolverr, which stopped clearing modern managed challenges; same API, so
+Prowlarr registers it as a FlareSolverr-type indexer proxy), Configarr (no port,
+run-to-completion) and Ofelia (the scheduler that starts it). Each is its own compose
+project (`docker-compose.<unit>.yml`, `-p nas-<unit>`) — there is no single `arr` compose
+file, no `depends_on`, and no shared volume between them; `arr` is a convenience alias the
+CLI expands to all nine. All bridge services on `nas-net` (created by `nas install`, joined
+as `external: true`); only Jellyfin needs host networking.
 
-- Media is mounted **read-write** here, unlike Jellyfin's `:ro`. Sonarr and Radarr each see
-  only the tree they manage (`/media/series`, `/media/movies`), and their root folders are the
-  existing `/volume1/Media/{Series,Movies}` — no migration, and Jellyfin's mounts are unchanged.
-- **The download path must be the identical container path in qBittorrent, Sonarr and Radarr**
+Lidarr is the music arr, same shape as Sonarr/Radarr with two deliberate differences:
+it sits **outside configarr/TRaSH scope** (the frozen Recyclarr template tree has no
+Lidarr profiles and configarr's Lidarr support is experimental, so its default quality
+profiles stand until that changes), and it has **no Seerr wiring** — Seerr does not do
+music requests. Its API is v1, like Prowlarr's, not v3.
+
+- Media is mounted **read-write** here, unlike Jellyfin's `:ro`. Sonarr, Radarr and Lidarr
+  each see only the tree they manage (`/media/series`, `/media/movies`, `/media/music`), and
+  their root folders are the existing `/volume1/Media/{Series,Movies,Music}` — no migration,
+  and Jellyfin's mounts are unchanged.
+- **The download path must be the identical container path in qBittorrent and every arr app**
   (`/downloads`). qBittorrent reports absolute paths, so a mismatch produces a remote-path-
   mapping failure on every import. This is required regardless of the hardlink question.
 - Identical mount paths do **not** buy hardlinks here, because the download tree is on a
@@ -392,22 +401,21 @@ and Ofelia (the scheduler that starts it). Each is its own compose project
 
 Each app's API key is injected as `<APP>__AUTH__APIKEY`, read at every start **in place of**
 `config.xml`, so the key is never persisted by the app; Seerr's rides the same flow as
-`API_KEY`. `up.sh` generates each of the four keys once, into that unit's own `.env`
-(`sonarr.env`/`radarr.env`/`prowlarr.env`/`seerr.env`) — one file, one key, one unit — and
-never regenerates it.
+`API_KEY`. `nas install` generates each of the five keys once, into that unit's own `.env`
+(`sonarr.env`/`radarr.env`/`lidarr.env`/`prowlarr.env`/`seerr.env`) — one file, one key,
+one unit — and never regenerates it.
 
 Each unit's own `.env` therefore holds the only copy of its key. Losing one does not error —
 that app quietly mints and persists a *new* key, and Prowlarr's sync, Configarr and that
-unit's Homepage widget break at once (not all three at once anymore: the split confines the
-damage to whichever unit actually lost its file). `down.sh` preserves every `.env` for this
-reason.
+unit's Homepage widget break at once, with no error anywhere; the per-unit split confines
+the damage to whichever unit actually lost its file. `nas destroy` preserves every `.env`
+for this reason.
 
-`shared.env` is deliberately narrower than the old `arr.env` was: it holds only what more
-than one unit genuinely reuses (`TZ`/`PUID`/`PGID`/`UMASK`/`DOCKER_GID`, `LAN_HOST`,
-`DOWNLOADS_DIR`, and the `ADMIN_USER`/`ADMIN_PASSWORD` identity — this replaces both the old
-`JELLYFIN_ADMIN_USER`/`PASSWORD` and `QBITTORRENT_USER`/`PASSWORD`, which used to be two
-physically separate values kept in sync by hand). No API key lives there: a key is exactly
-one unit's concern, so it stays in that unit's own file.
+`shared.env` holds only what more than one unit genuinely reuses: `TZ`/`PUID`/`PGID`/
+`UMASK`/`DOCKER_GID`, `LAN_HOST`, `DOWNLOADS_DIR`, and the single `ADMIN_USER`/
+`ADMIN_PASSWORD` identity that Jellyfin's admin login, qBittorrent's WebUI and Seerr's
+`/auth/jellyfin` all consume. No API key lives there: a key is exactly one unit's concern,
+so it stays in that unit's own file.
 
 The keys also appear in `homepage.widget.key` labels, and labels are readable by anything that
 can read the Docker socket or run `docker inspect`. Accepted on the same basis as the socket
@@ -419,7 +427,7 @@ decision if the box ever becomes externally reachable.
 qBittorrent generates a **new random WebUI password on every start unless one is already
 stored** — the sole trigger is an empty stored password, and the temporary one is per-session
 and never persisted. Without pre-seeding, every container restart would invalidate the
-credentials Sonarr and Radarr hold. So `up.sh` writes `qBittorrent.conf` before first start
+credentials the arr apps hold. So `nas install` writes `qBittorrent.conf` before first start
 with a PBKDF2 hash (SHA-512, 100000 iterations, 16-byte salt, 64-byte key,
 `base64(salt):base64(key)` wrapped in `@ByteArray(...)`).
 
@@ -438,13 +446,13 @@ details are easy to get wrong:
   unsafe.
 
 Deletion is the arr apps' half of the hand-off: **`removeCompletedDownloads` is `true`** on
-the Sonarr/Radarr download clients, and the pinned versions only remove a torrent — *with*
-its files — once qBittorrent reports it stopped at the cap, never mid-seed. (The old caveat
-that this setting removed torrents right after import, defeating the cap, was v2-era
-behavior.) The rejected alternative, `ShareLimitAction=RemoveWithContent` with arr-side
-removal off, frees the same space but can delete a download the arr app has not imported
-yet — and Sonarr/Radarr's download-client POST/PUT refuses (HTTP 400) any qBittorrent
-configured to remove at the limit, so the pairing is enforced by their own validation.
+every arr download client, and the pinned versions only remove a torrent — *with* its
+files — once qBittorrent reports it stopped at the cap, never mid-seed. (A caveat that this
+setting removed torrents right after import, defeating the cap, was v2-era behavior — do
+not act on it.) `ShareLimitAction=RemoveWithContent` with arr-side removal off would free
+the same space but can delete a download the arr app has not imported yet — and the arr
+apps' download-client POST/PUT refuses (HTTP 400) any qBittorrent configured to remove at
+the limit, so the pairing is enforced by their own validation.
 Accepted costs: torrents added outside the arr apps (or in a foreign category) stop at the
 cap but are never deleted, and a failed import holds its data on the SSD until resolved in
 the Activity queue rather than being silently reaped.
@@ -463,47 +471,37 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 
 ## 10. Running
 
-`sudo ./up.sh` takes a fresh clone to running: `nas-net` (script-created, before anything
-else), env files from the examples, host directories with correct ownership, generated
-per-unit arr secrets, `homepage` then `jellyfin` then the eight arr units, then each API
-bootstrap — `jellyfin-bootstrap.sh`, `arr-bootstrap.sh`, and finally `seerr-bootstrap.sh`,
-which must come last because it binds requests to the quality profiles Configarr creates in
-the step before. Idempotent — existing `.env` files are never overwritten and configured
-steps are skipped. A Seerr bootstrap failure is **deferred, not fatal**: the stack stays up,
-but `up.sh` prints a banner in its summary and exits non-zero, so an unconfigured Seerr can
-no longer pass as a successful bring-up.
-`./down.sh` reverses it and is a **dry run by default**.
-`./configure.sh` is the optional interactive front-end: it detects host facts and fills in
-`shared.env` and the `.env` files (never the generated secrets), so `up.sh` itself stays
-non-interactive.
+One CLI, `./nas`, is the whole operator interface: `configure` (the gum wizard, TTY only),
+`install` (root; brings units up, then chains `post-install` — the API bootstraps in the
+fixed order jellyfin → arr → seerr), `destroy` (root; shows the full plan first, then an
+explicit confirmation — typed `delete` when data is involved), `recreate` (destroy +
+install, one confirmation), plus the read-only `status`, `logs`, `doctor` and the
+deliberately manual `indexers`. Full behavior spec: `docs/cli-spec.md`; the plain-compose
+invocations underneath, and the invariants an operator or agent must preserve, are in
+`CLAUDE.md` §Running. Underneath it is ordinary compose — one project per **service**,
+`--env-file shared.env` first, then the unit's own.
 
-Underneath it is plain compose. Compose does not read a `.env` file on its own and every unit
-shares one directory, so `--env-file` (`shared.env` first, then the unit's own) and
-`-p nas-<unit>` are required on every call — one project per **service**, not per tier:
+The reasoning the CLI encodes:
 
-```
-docker network create nas-net   # up.sh, idempotent — no compose file owns this
-docker compose -p nas-homepage --env-file shared.env --env-file homepage.env -f docker-compose.homepage.yml up -d
-docker compose -p nas-jellyfin --env-file shared.env --env-file jellyfin.env -f docker-compose.jellyfin.yml up -d
-docker compose -p nas-radarr   --env-file shared.env --env-file radarr.env   -f docker-compose.radarr.yml   up -d
-```
-
-`configarr` takes two extra `--env-file` flags (`sonarr.env`, `radarr.env`, on top of
-`shared.env`/`configarr.env`) since its compose file needs their API keys and a copy would go
-stale; it is also the one unit `up.sh`/`down.sh` never bring up with a plain `up -d` (always
-`--no-start`, behind its own compose profile) — see section 8.
-
-Bring-up order no longer has a network-ownership constraint — `nas-net` exists before any
-unit starts, and is removed only once nothing is still attached, whichever units come down
-last. `core` and `arr` survive purely as `up.sh`/`down.sh`/`configure.sh` convenience aliases
-(`core` → `homepage`, `arr` → the eight arr units), not as compose or network concepts.
-
-`down.sh` invariant: **nothing outside `/volume2/docker` can be deleted.** Delete targets
-come from a sourced `.env` and every path is validated against that root — rejected if it
-escapes, contains `..`, or is the root itself. `.env` files survive teardown, which for the
-arr units also means their API keys survive. The download tree is exempted by name rather
-than by the root check: it *is* inside `/volume2/docker` and would pass validation, but a
-still-seeding torrent is not a config artifact and is not reproducible from this repo.
+- **Idempotent install.** Existing `.env` files are never overwritten, secrets are
+  generated exactly once, config templates install only when absent, bootstraps skip what
+  is already configured. Running it twice is safe.
+- **Per-unit lifecycle.** `sudo ./nas recreate radarr` tears down and recreates exactly one
+  unit while it stays wired into the rest of the stack; the CLI — never a compose file —
+  carries the cross-unit couplings (section 8, `docs/cli-spec.md`). `core` and `arr` are
+  selection aliases only, not compose or network concepts.
+- **Destruction is scoped and previewed.** Nothing outside `/volume2/docker` can be
+  deleted, and the plan is shown before anything runs. `.env` files survive teardown —
+  they hold the only copy of each key. The download tree is exempted by name rather than
+  by the root check: it *is* inside `/volume2/docker` and would pass validation, but a
+  still-seeding torrent is not a config artifact and is not reproducible from this repo.
+- **Bootstrap ordering.** Seerr comes last because it binds requests to the quality
+  profiles Configarr creates. A Seerr failure is **deferred, not fatal**: the stack stays
+  up, the summary names it, the exit code is non-zero — an unconfigured Seerr cannot pass
+  as a successful bring-up.
+- **Bring-up order has no network-ownership constraint.** `nas-net` exists before any unit
+  starts and is removed only once nothing is still attached, whichever units come down
+  last.
 
 ---
 
@@ -523,15 +521,16 @@ still-seeding torrent is not a config artifact and is not reproducible from this
 | arr root folders on the existing `Media/` dirs | No migration of a live library; Jellyfin unchanged | Keeps the capitalised, non-TRaSH layout |
 | `PUID`/`PGID` as env for arr | What LinuxServer.io images support; no socket access to gate | Inconsistent with Homepage/Jellyfin's `user:` |
 | Each arr unit's API key generated into its own `.env` | Breaks the key-distribution cycle; bring-up is one pass; a lost/rotated key only breaks that one unit | That `.env` is the only copy and is load-bearing forever |
-| Per-service compose files + `shared.env`, `core`/`arr` as aliases only | `./down.sh radarr && sudo ./up.sh radarr` tears down and recreates exactly one unit; `up.sh`/`down.sh` are the only place that knows how units relate | 10 compose files instead of 3; `configarr`'s extra `--env-file` flags and `ofelia`'s "ensure configarr exists" are coupling that now lives in a script, not a compose file |
+| Per-service compose files + `shared.env`, `core`/`arr` as aliases only | `sudo ./nas recreate radarr` tears down and recreates exactly one unit; the CLI is the only place that knows how units relate | A dozen compose files instead of 3; `configarr`'s extra `--env-file` flags and `ofelia`'s "ensure configarr exists" are coupling that lives in the CLI, not a compose file |
 | Keys in `homepage.widget.*` labels | Widgets need them; tile config stays with the service | Readable via `docker inspect` |
 | No VPN for torrent traffic | Nothing to configure or keep alive | Torrent traffic uses the LAN's own egress |
 | Configarr over Recyclarr | Reads `!env` natively, so the bootstrap needs no fragile generate-then-rewrite credential patching; actively tracks upstream template churn | Younger project; no built-in scheduler, so one is bolted on |
-| Ofelia as that scheduler | Keeps the daily cadence inside compose — no host cron for `down.sh` to clean up | A **second** container with root-equivalent socket access |
-| `down.sh` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
-| Seerr as one of the `arr`-alias units | Consumes the Sonarr/Radarr keys from their own `.env` files; same lifecycle and bootstrap ordering | `down.sh arr` (default) deletes its request history; it is not strictly an "arr" app |
-| Seerr's admin is the Jellyfin admin account, via `shared.env`'s `ADMIN_USER`/`ADMIN_PASSWORD` | The first `/auth/jellyfin` call creates it — no second credential to mint or store; the identity is shared with qBittorrent's WebUI too, so it is prompted/stored once, not kept in sync by hand across files | One password now gates two logins — rotating it means re-running the bootstraps that seed each |
-| Seerr's bootstrap is its own script, failing non-zero | As part of `arr-bootstrap.sh` every step was `warn; return 0`, so a Seerr that configured *nothing* was indistinguishable from one skipped on purpose — `up.sh` exited 0 over it | A fourth automation script, and `up.sh` now has an exit code that depends on a non-essential service |
+| Ofelia as that scheduler | Keeps the daily cadence inside compose — no host cron for `nas destroy` to clean up | A **second** container with root-equivalent socket access |
+| `nas destroy` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
+| Lidarr outside configarr/TRaSH scope, and outside Seerr | The frozen Recyclarr template tree has no Lidarr profiles, configarr's Lidarr support is experimental, and Seerr does not do music requests | Default quality profiles until that changes; music is requested in Lidarr itself |
+| Seerr as one of the `arr`-alias units | Consumes the Sonarr/Radarr keys from their own `.env` files; same lifecycle and bootstrap ordering | `nas destroy arr` (and the no-args default) deletes its request history; it is not strictly an "arr" app |
+| Seerr's admin is the Jellyfin admin account, via `shared.env`'s `ADMIN_USER`/`ADMIN_PASSWORD` | The first `/auth/jellyfin` call creates it — no second credential to mint or store; the identity is shared with qBittorrent's WebUI too, so it is prompted/stored once, not kept in sync by hand across files | One password gates several logins, and rotating it has **no working path today**: `qBittorrent.conf` installs only when absent, jellyfin-bootstrap never changes an existing password, arr-bootstrap skips an existing download client. Rotation is reserved for a future `nas configure --rotate-identity` (`docs/wizard-spec.md` §Future) |
+| Seerr's bootstrap is its own script, failing non-zero | Inside `arr-bootstrap.sh` every step was `warn; return 0`, so a Seerr that configured *nothing* was indistinguishable from one skipped on purpose and the bring-up reported success over it | A fourth automation script, and the install exit code depends on a non-essential service |
 | Seerr → Jellyfin by LAN IP | Host-networked Jellyfin is off `nas-net`; container names and mDNS don't resolve | Breaks if the DHCP reservation ever moves |
 
 ### The standing assumption

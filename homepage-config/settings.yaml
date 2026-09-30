@@ -1,4 +1,4 @@
-# Dashboard-wide settings. Installed by up.sh only when absent, so on-NAS edits
+# Dashboard-wide settings. Installed by nas install only when absent, so on-NAS edits
 # survive — edit it there, not here, once running.
 #
 # Layout keys must match group names EXACTLY as the homepage.group= labels
