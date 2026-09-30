@@ -536,6 +536,10 @@ if [ "$ARR_RUN_CONFIGARR" = "1" ] && [ "$have_sonarr" -eq 1 ] && [ "$have_radarr
     # A real read-only run: configarr prints the same diff it would apply, which
     # is a far better preflight than echoing the command back.
     if [ "$DRY_RUN" -eq 1 ]; then
+      if [ ! -f "${CONFIGARR_CONFIG_DIR:-/volume2/docker/configarr/config}/config.yml" ]; then
+        info "[dry-run] configarr preflight skipped — config.yml not installed yet (install copies it)"
+        return 0
+      fi
       info "[dry-run] configarr (DRY_RUN=true — reports the diff, changes nothing)"
       configarr_run configarr-dryrun -e DRY_RUN=true 2>&1 | sed 's/^/    /' || true
       return 0

@@ -48,3 +48,14 @@ ensure_nas_net() {
 container_state() { # running / exited / created / "" when absent
   docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null || true
 }
+
+# The read-only verbs run without root, but the socket is root:docker — an
+# unreachable daemon must read as "unknown", never as "not installed" or as a
+# foreign process on our port.
+DOCKER_OK=""
+docker_reachable() {
+  if [ -z "$DOCKER_OK" ]; then
+    if docker info >/dev/null 2>&1; then DOCKER_OK=1; else DOCKER_OK=0; fi
+  fi
+  [ "$DOCKER_OK" -eq 1 ]
+}

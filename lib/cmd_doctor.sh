@@ -23,12 +23,21 @@ cmd_doctor() {
   done
   select_units doctor 1 ${args[@]+"${args[@]}"}
   command -v docker >/dev/null 2>&1 || die "docker is required"
+  docker_reachable || warn "cannot reach the docker daemon as this user — container-dependent checks are skipped (re-run: sudo ./nas doctor)"
 
   local unit
   for unit in $(selected_units); do
     unit_load "$unit"
     unit_env_load
     say "doctor: ${unit}"
+    if [ -n "$UNIT_ENV_FILE" ] && [ ! -f "$UNIT_ENV_FILE" ]; then
+      if [ "$UNIT_STANDALONE" -eq 1 ]; then
+        info "not configured yet (${UNIT_ENV_FILE} missing) — run: ./nas configure ${unit}, then: cd pi-hole && sudo docker compose up -d"
+      else
+        info "not installed yet (${UNIT_ENV_FILE} missing) — run: sudo ./nas install ${unit}"
+      fi
+      continue
+    fi
     doctor_compose_renders
     doctor_container_vs_env
     doctor_ports
@@ -89,8 +98,8 @@ doctor_container_vs_env() {
 }
 
 doctor_ports() {
-  local flags port state
-  state=$(container_state "$UNIT_CONTAINER")
+  local flags port state=""
+  docker_reachable && state=$(container_state "$UNIT_CONTAINER")
   flags=$(compose_env_flags)
   # shellcheck disable=SC2086
   for port in $(docker compose ${UNIT_PROJECT:+-p "$UNIT_PROJECT"} $flags -f "$UNIT_COMPOSE_FILE" config 2>/dev/null \
@@ -100,8 +109,12 @@ doctor_ports() {
       continue
     fi
     if listener_on_port "$port"; then
-      doctor_fail "port ${port}: ${UNIT_NAME} is not running but something listens there" \
-        "identify it: sudo ss -ltnp 'sport = :${port}'"
+      if docker_reachable; then
+        doctor_fail "port ${port}: ${UNIT_NAME} is not running but something listens there" \
+          "identify it: sudo ss -ltnp 'sport = :${port}'"
+      else
+        info "port ${port} has a listener — cannot attribute it without docker access (sudo ./nas doctor)"
+      fi
     else
       doctor_pass "port ${port} free"
     fi
@@ -124,6 +137,7 @@ listener_on_port() {
 doctor_socket_access() {
   local sock_gid cfg_user container_gid
   [ -S /var/run/docker.sock ] || { info "no /var/run/docker.sock here — skipped"; return 0; }
+  docker_reachable || { info "docker unreachable — socket check skipped"; return 0; }
   cfg_user=$(docker inspect -f '{{.Config.User}}' "$UNIT_CONTAINER" 2>/dev/null) \
     || { info "${UNIT_CONTAINER} not created — socket check skipped"; return 0; }
   sock_gid=$(stat -c %g /var/run/docker.sock 2>/dev/null) || return 0

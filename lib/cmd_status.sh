@@ -14,6 +14,8 @@ cmd_status() {
   done
   select_units status 1 ${args[@]+"${args[@]}"}
 
+  docker_reachable || warn "cannot reach the docker daemon as this user — container states show as 'unknown' (re-run: sudo ./nas status)"
+
   local rows unit
   rows="unit\tstate\tenv\tconfig\ttile"
   for unit in $(selected_units); do
@@ -47,8 +49,12 @@ status_row() {
   unit_load "$unit"
   unit_env_load
 
-  state=$(container_state "$UNIT_CONTAINER")
-  [ -n "$state" ] || state="not-installed"
+  if docker_reachable; then
+    state=$(container_state "$UNIT_CONTAINER")
+    [ -n "$state" ] || state="not-installed"
+  else
+    state="unknown"
+  fi
 
   if [ ! -f "$UNIT_ENV_FILE" ]; then
     env_col="missing"

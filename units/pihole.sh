@@ -27,6 +27,7 @@ unit_configure() {
 
 unit_doctor() {
   local state
+  docker_reachable || { info "docker unreachable — container checks skipped"; return 0; }
   state=$(container_state pihole)
   if [ "$state" != "running" ]; then
     doctor_fail "pihole container is ${state:-absent}" \
