@@ -2,7 +2,8 @@
 # nas post-install — per-unit API configuration over the running services,
 # re-runnable at any time (docs/cli-spec.md §nas post-install). Fixed order
 # jellyfin → arr → seerr (R8): seerr binds to the quality profiles configarr
-# creates, so it must go last, and its failure is deferred, never fatal.
+# creates, so it must follow arr, and its failure is deferred, never fatal.
+# unmanic runs after them all and depends on none of them.
 
 SEERR_DEFERRED_RC=0
 
@@ -39,9 +40,9 @@ post_install_usage() {
 nas post-install [--dry-run] [--verbose] [unit...|all]
 
 Configures the selected units' running services over their APIs, in the fixed
-order jellyfin -> arr -> seerr. Wraps the bootstrap scripts; idempotent and
-re-runnable without touching containers. Units without a post-install step
-are skipped silently.
+order jellyfin -> arr -> seerr -> unmanic. Wraps the bootstrap scripts;
+idempotent and re-runnable without touching containers. Units without a
+post-install step are skipped silently.
 EOF
 }
 
@@ -91,6 +92,20 @@ post_install_run() {
         "The rest of the stack is up. Seerr will show its first-run wizard," \
         "and Homepage's Seerr widget returns 403 until setup completes." \
         "The cause is in the output above. Fix it, then: ./nas post-install seerr"
+    fi
+  fi
+
+  # Order-independent: it reads the arr keys from their env files and needs
+  # Radarr/Sonarr only later, when a file is tested. Last so it never delays
+  # the steps users notice.
+  if want unmanic; then
+    say "Configuring Unmanic"
+    local unmanic_rc=0
+    # shellcheck disable=SC2086
+    ./unmanic-bootstrap.sh $(bootstrap_args) || unmanic_rc=$?
+    if [ "$unmanic_rc" -ne 0 ]; then
+      warn "unmanic-bootstrap.sh failed (exit ${unmanic_rc})"
+      mark_failed unmanic "$unmanic_rc"
     fi
   fi
 }

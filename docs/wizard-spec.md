@@ -106,7 +106,7 @@ Hybrid, and the split maps onto the CLI's unit files (cli-spec §Code layout):
 
 - **Core owns the cross-unit passes**: the shared identity and host facts; the
   media directories asked **once** and staged into every consumer (jellyfin's
-  `MEDIA_*_DIR`, sonarr/radarr/lidarr's `ARR_*_DIR` and tdarr's `TDARR_*_DIR` from the same answer); and the
+  `MEDIA_*_DIR`, sonarr/radarr/lidarr's `ARR_*_DIR` and unmanic's `UNMANIC_*_DIR` from the same answer); and the
   generic per-unit walk over `.env.example` (file order; the contiguous `#` block
   above a var is its help text; `UNIT_GENERATED` vars are never staged, shown, or
   cleared — W2).

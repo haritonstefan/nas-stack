@@ -15,7 +15,7 @@ units:
 - **`homepage`** — the dashboard on `:80`, the entrypoint to everything.
 - **`jellyfin`** — the media server, host-networked.
 - **`sonarr` / `radarr` / `lidarr` / `prowlarr` / `qbittorrent` / `seerr` / `byparr` / `configarr` / `ofelia`** — the arr stack.
-- **`tdarr`** — post-import track cleanup on the movie/series library. Not in the `arr` alias. See `## Tdarr`.
+- **`unmanic`** — post-import track cleanup on the movie/series library. Not in the `arr` alias. See `## Unmanic`.
 - **`pihole`** — deliberately standalone: macvlan compose in `pi-hole/` with its
   own `.env` (auto-read, no `--env-file`), own LAN IP `192.168.0.53`.
   `nas configure` and the read-only verbs cover it; the lifecycle verbs refuse
@@ -28,7 +28,7 @@ units:
 Bring-up order: `nas-net` first (script-managed, owned by no compose file),
 then any unit in any order — nothing hard-depends on another unit being up.
 The known cross-unit couplings live in the CLI, never in a compose file:
-configarr's and tdarr's extra `--env-file` flags, configarr's `--no-start`, ofelia's "ensure the
+configarr's extra `--env-file` flags and `--no-start`, ofelia's "ensure the
 configarr container exists" (see `## Arr`), and the jellyfin→homepage
 widget-key recreate (see `## Jellyfin`).
 
@@ -42,7 +42,8 @@ widget-key recreate (see `## Jellyfin`).
   delete-path validation, gum wrappers with plain fallbacks) plus one
   `cmd_<verb>.sh` per verb. `lib/http.sh` is the curl/masking layer
   `arr-bootstrap.sh`, `seerr-bootstrap.sh` and `arr-indexers.sh` share
-  (jellyfin-bootstrap carries its own `api()` — Jellyfin's bodies are PascalCase).
+  (jellyfin-bootstrap carries its own `api()` — Jellyfin's bodies are PascalCase;
+  so does unmanic-bootstrap — no auth header, and its secrets sit in plugin settings).
 - `units/<unit>.sh` — one file per unit: everything the CLI knows about it.
   Contract in `docs/cli-spec.md` §Code layout, values tabulated in
   `docs/units.md`. Cross-unit knowledge never lives in a unit file.
@@ -50,7 +51,7 @@ widget-key recreate (see `## Jellyfin`).
   only: no TTY, a missing binary or a failed checksum degrades to plain
   prompts — a gum problem can never change what the CLI does.
 - `jellyfin-bootstrap.sh` / `arr-bootstrap.sh` / `seerr-bootstrap.sh` /
-  `arr-indexers.sh` — the four surviving API drivers, all with `--help`,
+  `unmanic-bootstrap.sh` / `arr-indexers.sh` — the five surviving API drivers, all with `--help`,
   runnable standalone; the CLI shells out to them (`nas post-install`,
   `nas indexers`). Contracts: `docs/cli-spec.md` §Surviving script contracts.
 - `nas indexers` (wrapping `arr-indexers.sh`) is deliberately **not** part of
@@ -70,8 +71,6 @@ widget-key recreate (see `## Jellyfin`).
   file (ports, config dirs, `RENDER_GID`, indexer lists, `ARR_MOVIES_DIR`/
   `ARR_SERIES_DIR`/`ARR_MUSIC_DIR`, etc.) — the same "single-consumer stays
   local" rule `shared.env` itself follows in reverse.
-- `tdarr-plugins/` — the Tdarr plugin that keeps original audio + chosen
-  subtitles, mounted read-only into the container (not a template).
 - `homepage-config/`, `qbittorrent-config/`, `configarr-config/` — config
   templates that `nas install` copies only when absent, so on-NAS edits
   survive. `qBittorrent.conf` additionally gets its `__PLACEHOLDER__` tokens
@@ -83,8 +82,9 @@ widget-key recreate (see `## Jellyfin`).
   `docs/` holds the CLI, wizard, unit and pihole specs, and the documentation
   policy (`docs/requirements.md` §Documentation policy).
 - `reference/` — the vendored API specs: Jellyfin's (JSON — query it with
-  `jq`, never `Read` it) and Seerr's (`seerr-api.yml`, multi-line YAML, safe
-  to grep + line-read). Recipes in `reference/README.md`.
+  `jq`, never `Read` it), Seerr's (`seerr-api.yml`, multi-line YAML, safe
+  to grep + line-read) and Unmanic's (`unmanic-api-v2.json`, query with `jq`).
+  Recipes in `reference/README.md`.
 - `TODO-healthchecks.md` — the one open work item.
 
 ## Your role
@@ -124,7 +124,7 @@ Run this on the NAS and paste the output:
 - PUID/PGID `1000:10`. `RENDER_GID=105` (Intel iGPU, `/dev/dri/renderD128`). `TZ=Europe/Bucharest`.
 - LAN IP `192.168.0.231` (DHCP reservation), `apollo.local` via mDNS.
 - Bind-mount sources are **not** auto-created with correct ownership — `nas install` mkdir+chowns them, which is one reason it needs root.
-- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`8686`/`9696`/`8080` → Sonarr/Radarr/Lidarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr, `8265` → Tdarr. `0.0.0.0:53` free → PiHole. UGOS on 9999.
+- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`8686`/`9696`/`8080` → Sonarr/Radarr/Lidarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr, `8888` → Unmanic. `0.0.0.0:53` free → PiHole. UGOS on 9999.
 - Docker daemon API `1.54` — pin images to exact patch versions and check compatibility against this.
 - Compose files must not hardcode host paths — all via `.env` (gitignored; `shared.env.example` / `<unit>.env.example` are the templates).
 
@@ -134,7 +134,7 @@ Run this on the NAS and paste the output:
 (default: all): `nas-net`, `.env` files from the examples (never overwritten),
 host dirs + ownership, generated per-unit secrets (once, never regenerated),
 config templates when absent, compose up, then it chains `nas post-install`:
-the bootstraps in the fixed order jellyfin → arr → seerr. The jellyfin step
+the bootstraps in the fixed order jellyfin → arr → seerr → unmanic. The jellyfin step
 restarts or recreates the container right after its own bootstrap when needed
 (exit 10, or the widget-key label lagging `jellyfin.env`) and runs the library
 scan **after** that restart, so the restart can't cut the scan short. A seerr
@@ -258,10 +258,15 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
 - **It reads four env files**: `shared.env` for `ADMIN_USER`/`ADMIN_PASSWORD` and `LAN_HOST`, `seerr.env` for its own key and settings, and `sonarr.env`/`radarr.env` for their keys and root folders. Each path resolves `./`-prefixed for a bare filename, so a run from another cwd cannot silently read nothing; the usual `*_ENV_FILE` variables override each one. `ADMIN_PASSWORD` is a required var for jellyfin, qbittorrent **and** seerr, so a seerr-only `nas install` stops at the wizard pointer instead of stalling on an empty password.
 - `GET /settings/jellyfin/library?enable=` **replaces** the enabled set — any library not listed is disabled — so the bootstrap only touches it pre-initialize.
 
-## Tdarr
+## Unmanic
 
-- **Never mount the download tree into Tdarr.** It rewrites files in place; the library is safe to rewrite only because imports are cross-filesystem copies, not the seeding file (spec §8 Tdarr).
-- **The plugin finds a file's movie/series by path prefix, so Tdarr's media mounts must keep the exact container paths Radarr/Sonarr use** (`/media/movies`, `/media/series`). Change one side and every file is skipped as "no arr item".
-- **The plugin takes config from the container environment only** — never add plugin inputs for keys or URLs (they'd be copies in Tdarr's database). API failures throw on purpose; don't turn them into skips (spec §8 Tdarr).
-- **Its libraries live in its database, set in the web UI** — no compose var or env file configures them, and `nas recreate tdarr` starts from an empty database. Any library setting that polls or re-scans on a schedule wakes the HDD; don't propose one.
-- Sized for remuxing (one CPU worker, no `/dev/dri`). A flow that re-encodes is a different unit shape — revisit both before adding one.
+- **Never mount the download tree into Unmanic.** It rewrites files in place; the library is safe to rewrite only because imports are cross-filesystem copies, not the seeding file (spec §8 Unmanic).
+- **The audio plugin finds a file's movie/series by path prefix, so Unmanic's media mounts must keep the exact container paths Radarr/Sonarr use** (`/media/movies`, `/media/series`). Change one side and every file is skipped — silently, since a failed lookup is a no-op by design.
+- **No plugin code lives in this repo.** The two community plugins (`unmanic_plugin_keep_original_language_audio`, `keep_stream_by_language`) are installed by `unmanic-bootstrap.sh` from zips pinned to a commit and a sha256. Bumping one means a new commit URL, version and checksum together — never point it at a branch. A plugin dropped into `/config/.unmanic/plugins/` is never registered: Unmanic runs only what's in its database, and the zip upload is how it gets there.
+- **The bootstrap owns the whole setup and rewrites it on every run** — plugins, the worker count (a fresh Unmanic has **zero** workers and processes nothing), both libraries, plugin settings and order. UI edits to those don't survive a re-run; change the script instead. `nas recreate unmanic` comes back fully configured.
+- **The arr keys sit in the audio plugin's per-library settings** — that plugin has no env option. The copy is re-synced from `sonarr.env`/`radarr.env` on every bootstrap run. The URLs are nas-net names (`http://radarr:7878`), not the host-side `RADARR_URL`.
+- **A library write saves plugin settings but discards whether that worked**, so a renamed key in a plugin bump would pass silently. The bootstrap reads one value per plugin back through `/plugins/info`; keep that check when changing settings.
+- **Empty `UNMANIC_SUBTITLE_LANGS` must reach the plugin as `*`.** `keep_stream_by_language` reads an empty list as "keep no subtitles" and strips them all.
+- **inotify on, scanner off, per library.** A scheduled scan walks the whole library and wakes the HDD; don't propose one. Existing files are only queued by a manual scan from the UI.
+- Sized for remuxing (one worker, no `/dev/dri`). A flow that re-encodes is a different unit shape — revisit both before adding one.
+- API spec vendored at `reference/unmanic-api-v2.json`; the behavior it doesn't document (zero workers, undeletable library 1, the flow-emptying write) is listed in `reference/README.md`.

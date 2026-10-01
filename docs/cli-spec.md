@@ -72,12 +72,13 @@ Everything that configures a *running* service over its API, a step of its own a
 the containers are up — re-runnable at any time without touching containers:
 
 1. Per selected unit, core calls the unit's `post_install` hook (Code layout below),
-   in the fixed order jellyfin → arr → seerr (R8). Units without a hook are skipped
+   in the fixed order jellyfin → arr → seerr → unmanic (R8). Units without a hook are skipped
    silently (homepage, ofelia, byparr, pihole).
 2. The hooks wrap the bootstrap scripts, which survive as standalone API drivers
    (§Migration): jellyfin (wizard, admin user, libraries, QSV, DLNA, Homepage key),
    arr (download clients, root folders, configarr preflight + run), seerr (sign-in,
-   libraries, arr wiring, initialize).
+   libraries, arr wiring, initialize), unmanic (pinned plugins, worker count,
+   libraries).
 3. Optional depth beyond the bootstraps lands here as it gets designed — additional
    Jellyfin/Seerr users for family members, library edits. Same contract as the
    bootstraps: idempotent, skip what already exists.
@@ -238,7 +239,7 @@ space-delimited word lists — no bash arrays.
 - `UNIT_CONTAINER` — container name. Default `<unit>`.
 - `UNIT_ENV_FILES` — ordered `--env-file` list, later wins. Default
   `shared.env <unit>.env`; configarr: `shared.env sonarr.env radarr.env
-  configarr.env`; tdarr: `shared.env sonarr.env radarr.env tdarr.env`; pihole: empty (compose auto-reads `pi-hole/.env`).
+  configarr.env`; pihole: empty (compose auto-reads `pi-hole/.env`).
 - `UNIT_UP_ARGS` / `UNIT_DOWN_ARGS` — appended to the compose `up` / `down`.
   configarr: `--no-start configarr` (naming the service enables its profile) /
   `--profile configarr`.
@@ -258,7 +259,7 @@ space-delimited word lists — no bash arrays.
 - `UNIT_LOG_PATHS` — log locations beyond `docker logs`, for `--save-logs`
   (jellyfin: `$JELLYFIN_CONFIG_DIR/log`).
 - `UNIT_POST_INSTALL` — the post-install driver: `jellyfin-bootstrap.sh`,
-  `seerr-bootstrap.sh`, the group token `arr`, or empty. `arr` maps six units
+  `seerr-bootstrap.sh`, `unmanic-bootstrap.sh`, the group token `arr`, or empty. `arr` maps six units
   (sonarr radarr lidarr prowlarr qbittorrent configarr) onto **one**
   `arr-bootstrap.sh` run, at most once per invocation — the script scopes itself
   by which env files exist, and the wiring is inherently group-shaped
@@ -303,13 +304,14 @@ jellyfin→homepage widget-key recreate stay in core (R7).
 
 The API drivers the CLI shells out to. Common ground: `set -euo pipefail`, exit `1` on
 precondition failures, `22` when an unguarded API call returns non-2xx, and cwd =
-repo root (none of the four `cd` on their own; `./nas` guarantees it).
+repo root (none of the five `cd` on their own; `./nas` guarantees it).
 
 | script | flags | env inputs (override var) | notes |
 |---|---|---|---|
 | `jellyfin-bootstrap.sh` | `--dry-run --verbose --scan-only --help` | shared.env; jellyfin.env (`ENV_FILE`) | exit `10` = success, restart needed. Writes `JELLYFIN_API_KEY` + `JELLYFIN_SCAN_TASK_ID` back into its env file. |
 | `arr-bootstrap.sh` | `--dry-run --verbose --help` | shared/sonarr/radarr/lidarr/prowlarr/qbittorrent/configarr `.env`, each with a `*_ENV_FILE` override | Scope = which env files exist; none present = "nothing to configure", exit 0. A failed configarr sync is also exit 0 (warn only — ofelia retries on schedule). |
 | `seerr-bootstrap.sh` | `--dry-run --verbose --help` | shared (`SHARED_ENV_FILE`), seerr (`ENV_FILE`), sonarr/radarr (`*_ENV_FILE`) | `SEERR_CONFIGURE != 1` = deliberate skip, exit 0. Prints observed state on every failure, never an asserted cause. |
+| `unmanic-bootstrap.sh` | `--dry-run --verbose --help` | unmanic (`ENV_FILE`), sonarr/radarr (`*_ENV_FILE`) | `UNMANIC_CONFIGURE != 1` = deliberate skip, exit 0. Plugin download or checksum failure = exit 1. Reads back every write it cannot trust (plugin version, per-library settings) — a mismatch is exit 22. A dry run still downloads and checksums the plugin zips. |
 | `arr-indexers.sh` | `--dry-run --verbose --non-interactive --help` | prowlarr.env (`ENV_FILE`) | Prompts via `/dev/tty`; no terminal = save-untested with warnings. Exit 0 can still mean trackers were skipped — the output must be read. |
 
 ## Migration

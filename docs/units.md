@@ -28,7 +28,7 @@ Uniform conventions (every unit, unless its row says otherwise):
 | byparr | — (no port, no tile) | — (stateless: no volumes, no vars of its own) | — | — | — |
 | configarr | — | `CONFIGARR_CONFIG_DIR`, `CONFIGARR_REPOS_DIR` | — | `configarr-config/config.yml` → config dir | required (cross-unit, via extra env files): `SONARR_API_KEY`, `RADARR_API_KEY` |
 | ofelia | — | `OFELIA_CONFIG_DIR` | — | `configarr-config/ofelia.ini` → config dir | — |
-| tdarr | 8265 (`TDARR_WEBUI_PORT`) | `TDARR_DATA_DIR/{server,configs,logs,cache}` — delete target is `TDARR_DATA_DIR` | `TDARR_MOVIES_DIR`, `TDARR_SERIES_DIR` (exists + writable) | — | required (cross-unit, via extra env files): `SONARR_API_KEY`, `RADARR_API_KEY` |
+| unmanic | 8888 (`UNMANIC_PORT`) | `UNMANIC_CONFIG_DIR`, `UNMANIC_CACHE_DIR` | `UNMANIC_MOVIES_DIR`, `UNMANIC_SERIES_DIR` (exists + writable) | — | — (its bootstrap reads `SONARR_API_KEY`/`RADARR_API_KEY` from their owners' files) |
 | pihole | — (standalone; NAS can't reach it) | — (compose-relative bind `./etc-pihole`) | — | — | required: `PIHOLE_PASSWORD` (hand-set, own credential — P4) |
 
 **Downloads trio**: when any of sonarr / radarr / lidarr / qbittorrent is selected,
@@ -70,13 +70,15 @@ first post-install.
 - Ad-hoc syncs use a throwaway `--name configarr-sync` / `configarr-dryrun` via
   `compose run --rm`, so they never collide with the scheduler-target container.
 
-## tdarr
+## unmanic
 
-- Env files, in order: `shared.env sonarr.env radarr.env tdarr.env` — same reason as
-  configarr: the plugin needs both keys and reads them from their owners' files.
-- `tdarr-plugins/` is a compose-relative `:ro` bind onto `/app/server/Tdarr/Plugins/Local`,
-  not a template: the repo is its only home, and a `git pull` reaches the container
-  without a reinstall.
+- Plain two-file unit: the compose file needs no arr key. `unmanic-bootstrap.sh` reads
+  `sonarr.env`/`radarr.env` itself (like `seerr-bootstrap.sh`) and writes the keys into
+  the audio plugin's per-library settings — a copy, re-synced on every run.
+- `UNIT_LOG_PATHS`: `$UNMANIC_CONFIG_DIR/.unmanic/logs` — inside the directory destroy
+  deletes, hence `--save-logs`.
+- Plugins: zips pinned to a commit + sha256 in `unmanic-bootstrap.sh`, uploaded over
+  the API. No plugin code lives in this repo.
 
 ## qBittorrent first-boot seed
 

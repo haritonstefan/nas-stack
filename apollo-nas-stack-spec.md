@@ -36,7 +36,7 @@ tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 | 8080 | qBittorrent web UI |
 | 6881 tcp+udp | qBittorrent torrent traffic |
 | 5055 | Seerr |
-| 8265 | Tdarr web UI (8266, its server port, stays unpublished) |
+| 8888 | Unmanic web UI |
 | — | PiHole claims no host port: macvlan gives it its own LAN IP (`192.168.0.53`, see `docs/pihole-spec.md`) |
 
 Publishing ports is the design. Every user-facing service claims a host port and is linked
@@ -197,7 +197,7 @@ never as separate partial bodies.
 │   ├── config/             # config.yml, installed by nas install when absent
 │   └── repos/              # cached TRaSH + Recyclarr template clones
 ├── ofelia/config/          # ofelia.ini — the configarr sync schedule
-├── tdarr/                  # server/ (database, plugins), configs/, logs/, cache/
+├── unmanic/                # config/ (database, plugins, logs in .unmanic/), cache/
 └── downloads/              # torrents seed from here; never a nas destroy target
     ├── incomplete/
     └── complete/
@@ -205,8 +205,8 @@ never as separate partial bodies.
 
 ```
 /volume1/Media/             # HDD — library root
-├── Movies/                 # :ro into Jellyfin, rw into Radarr and Tdarr
-├── Series/                 # :ro into Jellyfin, rw into Sonarr and Tdarr
+├── Movies/                 # :ro into Jellyfin, rw into Radarr and Unmanic
+├── Series/                 # :ro into Jellyfin, rw into Sonarr and Unmanic
 └── Music/                  # :ro into Jellyfin, rw into Lidarr
 ```
 
@@ -399,47 +399,62 @@ music requests. Its API is v1, like Prowlarr's, not v3.
   Jellyfin admin account, signed in via `/auth/jellyfin` using `shared.env`'s `ADMIN_USER`/
   `ADMIN_PASSWORD`, the same identity qBittorrent's WebUI uses.
 
-### Tdarr
+### Unmanic
 
 Post-import cleanup of the movie and series library: it remuxes each file to drop
 unwanted audio and subtitle tracks (stream copy, no re-encode). It is its own unit,
 outside the `arr` alias — nothing in the arr wiring calls it, and `nas destroy arr`
-should not take its database with it.
+should not take its database with it. It replaced Tdarr, whose rule had to live in a
+plugin this repo wrote and maintained; Unmanic's community plugins already do the job.
 
-- **It mounts the library read-write and never the download tree.** Tdarr replaces the
-  original file in place. Imports are cross-filesystem copies (section 6), so the library
-  file and the seeding file are different inodes — rewriting one cannot corrupt the other.
-  Mounting `/downloads` would remove that guarantee.
-- **The cache (`/temp`) is on the SSD.** The rewritten file is built there and then
-  replaces the original, so the HDD reads the source once and writes the result once. It
-  needs free space for the largest file in flight.
-- **One CPU worker, no GPU.** A remux is disk-bound, and a second parallel job only makes
+- **It mounts the library read-write and never the download tree.** Unmanic replaces
+  the original file in place. Imports are cross-filesystem copies (section 6), so the
+  library file and the seeding file are different inodes — rewriting one cannot corrupt
+  the other. Mounting `/downloads` would remove that guarantee.
+- **The cache (`/tmp/unmanic`) is on the SSD.** The rewritten file is built there and
+  then replaces the original, so the HDD reads the source once and writes the result
+  once. It needs free space for the largest file in flight.
+- **One worker, no GPU.** A remux is disk-bound, and a second parallel job only makes
   the HDD seek between two files. `/dev/dri` is not passed through because nothing
-  re-encodes. Enabling transcoding would mean revisiting both.
-- **The rule lives in a repo-owned plugin**, `tdarr-plugins/Tdarr_Plugin_nas_keep_original_audio.js`,
-  mounted read-only as Tdarr's `Plugins/Local`. It keeps the audio tracks in the title's
-  original language and the subtitles in `TDARR_SUBTITLE_LANGS`, and removes the rest by
-  stream copy. The original language is `originalLanguage` on the Radarr movie / Sonarr
-  series whose `path` prefixes the file's path — which only works because Tdarr mounts the
-  library at the same container paths as Radarr and Sonarr (`/media/movies`,
-  `/media/series`).
-- **The plugin is configured by environment, not plugin inputs.** Inputs live in Tdarr's
-  database, so an API key typed there is a copy that goes stale when the key rotates. The
-  keys come from `sonarr.env`/`radarr.env` via extra `--env-file` flags, like configarr.
-- **It fails safe.** No audio track tagged in the original language → audio untouched.
-  Untagged/`und` tracks → kept. Empty `TDARR_SUBTITLE_LANGS` → subtitles untouched. A
-  language outside its table, or a file no arr item owns → skipped. An API failure
-  *throws* rather than skipping, because Tdarr never revisits a file it marked "not
-  required" — an outage must not look like a deliberate skip. Already-clean files are a
-  no-op, so the re-scan after a rewrite does not loop.
-- **Libraries live in Tdarr's database** (`/app/server`), set in its web UI. The repo seeds
-  none of it, and `nas recreate tdarr` starts from an empty database. Per library: source
-  `/media/movies` (or `/media/series`), transcode cache `/temp`, output written over the
-  original, classic plugin stack with the Local plugin `Tdarr_Plugin_nas_keep_original_audio`.
-  Nothing configured may poll or re-scan the library on a schedule — the HDD stays asleep
-  at idle (section 6). A new library's first scan queues every existing file.
-- Identity via `PUID`/`PGID` env like the LSIO images, but the umask variable is
-  `UMASK_SET`, Tdarr's own name. Tdarr's optional auth stays off: the box is LAN-only.
+  re-encodes. Enabling transcoding would mean revisiting both. A fresh Unmanic ships
+  with **zero** workers, so the bootstrap's worker write is what makes it process at all.
+- **Two community plugins, pinned.** Audio: `unmanic_plugin_keep_original_language_audio`
+  (MatthijsSmets, 1.0.0) looks up `originalLanguage` on the Radarr movie / Sonarr series
+  whose path prefixes the file's path, and removes audio in other languages. Subtitles:
+  `keep_stream_by_language` (yajrendrag, 0.3.3) with audio set to `*` keeps only the
+  subtitles in `UNMANIC_SUBTITLE_LANGS`. Community repos always serve their latest
+  build, so `unmanic-bootstrap.sh` installs each from a zip at a fixed commit, checked
+  against a sha256 — the same reason every image is pinned.
+- **The path match only works because the container paths are shared.** Unmanic mounts
+  the library at `/media/movies` and `/media/series`, exactly like Radarr and Sonarr, so
+  the audio plugin needs no path mapping. Change one side and every file is skipped.
+- **It fails safe.** Any failure of the audio lookup — Radarr/Sonarr down, no matching
+  item, no original language, no audio track tagged in it — leaves the file unchanged,
+  and neither plugin ever removes the last audio track. An empty
+  `UNMANIC_SUBTITLE_LANGS` is sent as `*` (keep all), because the subtitle plugin reads
+  an empty list as "keep none". Accepted differences from the Tdarr rule: an untagged or
+  `und` audio track is removed when a tagged original-language track exists (Tdarr kept
+  it), and a file whose lookup failed is not retried on its own — only a later scan or
+  a new write to that file tests it again.
+- **The repo owns the whole setup, over the API.** `unmanic-bootstrap.sh` (run by
+  `nas post-install`) uploads the plugins, sets the worker count, and writes both
+  libraries with both plugins enabled, configured and ordered (audio, then subtitles).
+  Library 1 is created by Unmanic at first boot and cannot be deleted, so it becomes
+  Movies; Series is created. A re-run rewrites all of it, so `nas recreate unmanic`
+  comes back fully configured and UI edits to these settings do not survive a re-run.
+- **The arr keys live in a copy.** The audio plugin reads the Radarr/Sonarr URL and key
+  from its per-library settings in Unmanic's config dir — no environment option exists.
+  The bootstrap re-syncs them from `sonarr.env`/`radarr.env` on every run, and the keys
+  never rotate on their own (section 8, Secrets). The URLs are the nas-net names
+  (`http://radarr:7878`), not the host-side `RADARR_URL` the bootstraps use.
+- **inotify on, scanner off.** The library scanner walks the whole tree on a schedule
+  and wakes the HDD. The file monitor is event-driven: it fires when Radarr/Sonarr write
+  a file, when the disk is awake anyway. It walks the directory tree once at container
+  start to place its watches. Files already in the library are never queued by it — a
+  one-off scan from the UI does that.
+- Identity via `PUID`/`PGID` env. The image has no umask variable, so what it writes
+  gets 022 — harmless, since every service runs as the same PUID. Its entrypoint chowns
+  `/config` recursively at every start. Unmanic has no API auth; the box is LAN-only.
 
 ### Secrets, and what actually lives in shared.env
 
@@ -517,7 +532,7 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 
 One CLI, `./nas`, is the whole operator interface: `configure` (the gum wizard, TTY only),
 `install` (root; brings units up, then chains `post-install` — the API bootstraps in the
-fixed order jellyfin → arr → seerr), `destroy` (root; shows the full plan first, then an
+fixed order jellyfin → arr → seerr → unmanic), `destroy` (root; shows the full plan first, then an
 explicit confirmation — typed `delete` when data is involved), `recreate` (destroy +
 install, one confirmation), plus the read-only `status`, `logs`, `doctor` and the
 deliberately manual `indexers`. Full behavior spec: `docs/cli-spec.md`; the plain-compose

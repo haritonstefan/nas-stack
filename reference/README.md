@@ -85,3 +85,43 @@ Facts already mined from it (v3.4.1), used by `seerr-bootstrap.sh`:
   `activeProfileId/activeProfileName/activeDirectory/is4k/isDefault`.
 - `POST /settings/{sonarr,radarr}/test` needs only
   `{hostname, port, apiKey, useSsl}` and returns the quality profiles.
+
+## `unmanic-api-v2.json`
+
+Unmanic's OpenAPI spec, vendored from the pinned image tag (the file lives in
+the source tree, not on a release page):
+
+```sh
+curl -sSL https://raw.githubusercontent.com/Unmanic/unmanic/0.4.1/unmanic/webserver/docs/api_schema_v2.json -o reference/unmanic-api-v2.json
+```
+
+Refresh it whenever the image tag in `docker-compose.unmanic.yml` changes —
+same tag, always. `.info.version` reads `2`, the *API* version, so like
+Seerr's it cannot confirm a match; the URL tag is the only pin. Every path is
+relative to `/unmanic/api/v2`.
+
+```sh
+jq -r '.paths | to_entries[] | "\(.key) [\(.value|keys|map(ascii_upcase)|join(","))]"' reference/unmanic-api-v2.json
+jq '.components.schemas.SettingsLibraryConfigReadAndWrite' reference/unmanic-api-v2.json
+```
+
+The spec documents shapes, not behavior. Facts read from the 0.4.1 source and
+used by `unmanic-bootstrap.sh`:
+
+- A fresh install's default worker group has **0 workers** — nothing runs
+  until it is set. `POST /settings/worker_group/write` takes the whole group.
+- Library 1 always exists (created at `/library`) and cannot be deleted.
+  `POST /settings/library/write` with `id: 0` creates a library.
+- That same write takes `plugins.enabled_plugins[]` with `has_config: true`
+  and a flat `settings` object, saved per library — but it **discards** the
+  settings save's result, so a wrong key fails silently. `POST /plugins/info`
+  with a `library_id` reads the values back.
+- `plugins.plugin_flow` lists plugin ids per flow type
+  (`library_management.file_test`, `worker.process`,
+  `postprocessor.file_move`, `postprocessor.task_result`). A type left out is
+  **emptied**, not kept.
+- Unmanic only runs plugins registered in its database. A plugin dir dropped
+  into `/config/.unmanic/plugins/` is never registered; the zip upload
+  (`POST /upload/plugin/file`) is the install path. Its multipart parser is
+  hand-rolled and expects curl's `-F 'fileName=@x.zip;type=application/zip'`
+  shape.

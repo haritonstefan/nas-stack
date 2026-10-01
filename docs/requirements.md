@@ -55,7 +55,7 @@ delete targets) is tabulated in `docs/units.md`:
 | configarr | TRaSH sync, run-to-completion | `arr-bootstrap.sh` (dry-run preflight) |
 | ofelia | scheduler for configarr | none |
 | seerr | request front-end | `seerr-bootstrap.sh` |
-| tdarr | post-import audio/subtitle cleanup | none (flows set up in its UI) |
+| unmanic | post-import audio/subtitle cleanup | `unmanic-bootstrap.sh` |
 | pihole | DNS ad-blocking | see `docs/pihole-spec.md` |
 
 `core` and `arr` remain selection aliases only (`core` → homepage, `arr` → sonarr,
@@ -91,7 +91,7 @@ them; a migration step that loses one is a regression, not a simplification.
   "ensure configarr exists", the jellyfin→homepage widget-key recreate) live in the
   CLI, nowhere else.
 - **R8 — Bootstrap ordering.** jellyfin → arr → seerr, because seerr binds to the quality
-  profiles configarr creates. A seerr failure is deferred, not fatal: stack stays up,
+  profiles configarr creates. unmanic runs last and depends on none of them. A seerr failure is deferred, not fatal: stack stays up,
   banner in the summary, non-zero exit.
 - **R9 — Live-NAS discipline.** GET-only probing, dry-run before mutating, logs collected
   before any wipe, exact image pins. (These are operator rules as much as CLI rules; the

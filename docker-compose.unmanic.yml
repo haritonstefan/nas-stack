@@ -1,0 +1,52 @@
+services:
+  # Libraries, plugins and the worker count live in Unmanic's own database
+  # under /config, written by unmanic-bootstrap.sh over the API — nothing in
+  # this file seeds them. See spec section 8, Unmanic.
+  unmanic:
+    image: josh5/unmanic:0.4.1
+    container_name: unmanic
+    restart: unless-stopped
+    # No UMASK: the image has no umask hook, so what it writes gets the default
+    # 022. Harmless here — every service runs as the same PUID.
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-10}
+      TZ: ${TZ:-Europe/Bucharest}
+    ports:
+      - "${UNMANIC_PORT:-8888}:8888"
+    volumes:
+      # The entrypoint chowns this recursively at every start; it only ever
+      # holds Unmanic's own state, so keep it that way.
+      - ${UNMANIC_CONFIG_DIR:-/volume2/docker/unmanic/config}:/config
+      # Scratch for the remuxed file before it replaces the original. On the
+      # SSD so the HDD reads the source once and writes the result once; needs
+      # free space for the largest file being processed.
+      - ${UNMANIC_CACHE_DIR:-/volume2/docker/unmanic/cache}:/tmp/unmanic
+      # Read-write: the result replaces the original in place. The download
+      # tree is deliberately not mounted, so a seeding torrent can never be
+      # touched — imports are copies (spec section 6). The container paths
+      # must stay identical to radarr's and sonarr's: the audio plugin matches
+      # a file to its movie/series by path prefix, with no path mapping set.
+      - ${UNMANIC_MOVIES_DIR:-/volume1/Media/Movies}:/media/movies
+      - ${UNMANIC_SERIES_DIR:-/volume1/Media/Series}:/media/series
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Media
+      - homepage.name=Unmanic
+      - homepage.icon=unmanic.png
+      - homepage.href=http://apollo.local:${UNMANIC_PORT:-8888}
+      - homepage.description=Track cleanup
+      - homepage.siteMonitor=http://unmanic:8888
+      - homepage.widget.type=unmanic
+      - homepage.widget.url=http://unmanic:8888
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true
