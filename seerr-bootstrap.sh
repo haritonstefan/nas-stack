@@ -329,10 +329,13 @@ if [ "$SEERR_INITIALIZED" != "true" ]; then
     # serverType 2 = MediaServerType.JELLYFIN (see decode_server_type above).
     # Deliberately not api(): this route takes no X-Api-Key — before the first
     # user exists there is nobody for the key to authenticate as.
+    # urlBase is required in practice though the spec omits it: getHostname()
+    # interpolates it raw, so leaving it out yields "http://host:8096undefined",
+    # and an unparseable URL comes back as a fabricated 404 INVALID_URL.
     body=$(jq -n --arg u "$jf_user" --arg p "$jf_pass" \
              --arg h "$SEERR_JELLYFIN_HOST" --argjson port "$SEERR_JELLYFIN_PORT" \
              '{username: $u, password: $p, hostname: $h, port: $port,
-               useSsl: false, serverType: 2}') \
+               useSsl: false, urlBase: "", serverType: 2}') \
       || { fail "could not build the sign-in body"; exit 1; }
     if [ "$VERBOSE" -eq 1 ]; then
       echo "    --> POST ${SEERR_URL}/api/v1/auth/jellyfin" >&2
