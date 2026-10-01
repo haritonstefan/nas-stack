@@ -8,7 +8,7 @@
 # ofelia→configarr coupling, the jellyfin widget-key recreate) lives in the
 # verb implementations, never in a unit file (R7).
 
-UNITS_ALL="homepage jellyfin sonarr radarr lidarr prowlarr qbittorrent seerr byparr configarr ofelia"
+UNITS_ALL="homepage jellyfin sonarr radarr lidarr prowlarr qbittorrent seerr byparr configarr ofelia tdarr"
 UNITS_STANDALONE="pihole"
 ARR_UNITS="sonarr radarr lidarr prowlarr qbittorrent seerr byparr configarr ofelia"
 

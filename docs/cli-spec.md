@@ -238,7 +238,7 @@ space-delimited word lists — no bash arrays.
 - `UNIT_CONTAINER` — container name. Default `<unit>`.
 - `UNIT_ENV_FILES` — ordered `--env-file` list, later wins. Default
   `shared.env <unit>.env`; configarr: `shared.env sonarr.env radarr.env
-  configarr.env`; pihole: empty (compose auto-reads `pi-hole/.env`).
+  configarr.env`; tdarr: `shared.env sonarr.env radarr.env tdarr.env`; pihole: empty (compose auto-reads `pi-hole/.env`).
 - `UNIT_UP_ARGS` / `UNIT_DOWN_ARGS` — appended to the compose `up` / `down`.
   configarr: `--no-start configarr` (naming the service enables its profile) /
   `--profile configarr`.

@@ -30,7 +30,7 @@ fresh clone plus one wizard run plus one install command reproduces the whole bo
 
 ## Non-goals
 
-- A generic "add any app" framework. The unit set is the eleven known apps. New apps are
+- A generic "add any app" framework. The unit set is the known apps listed below. New apps are
   added by hand, following the existing per-unit pattern, not by a plugin mechanism.
 - TLS, reverse proxy, custom DNS names, external exposure. The architecture decisions in
   `apollo-nas-stack-spec.md` §2–3 stand.
@@ -40,7 +40,7 @@ fresh clone plus one wizard run plus one install command reproduces the whole bo
 
 ## Scope: the units
 
-The twelve units, each a self-contained `docker-compose.<unit>.yml` + `<unit>.env`
+The thirteen units, each a self-contained `docker-compose.<unit>.yml` + `<unit>.env`
 pair. The per-unit data the CLI drives them with (dirs, templates, ports, secrets,
 delete targets) is tabulated in `docs/units.md`:
 
@@ -55,6 +55,7 @@ delete targets) is tabulated in `docs/units.md`:
 | configarr | TRaSH sync, run-to-completion | `arr-bootstrap.sh` (dry-run preflight) |
 | ofelia | scheduler for configarr | none |
 | seerr | request front-end | `seerr-bootstrap.sh` |
+| tdarr | post-import audio/subtitle cleanup | none (flows set up in its UI) |
 | pihole | DNS ad-blocking | see `docs/pihole-spec.md` |
 
 `core` and `arr` remain selection aliases only (`core` → homepage, `arr` → sonarr,

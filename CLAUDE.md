@@ -9,12 +9,13 @@ file, no `depends_on`, no shared volumes between units. The only things units
 have in common are the `nas-net` network (created by the CLI, not by any
 compose file) and `shared.env` (the vars genuinely reused by more than one
 unit: identity, host facts). The CLI is the only place that knows how units
-relate to each other — compose files stay ignorant of one another. Twelve
+relate to each other — compose files stay ignorant of one another. Thirteen
 units:
 
 - **`homepage`** — the dashboard on `:80`, the entrypoint to everything.
 - **`jellyfin`** — the media server, host-networked.
 - **`sonarr` / `radarr` / `lidarr` / `prowlarr` / `qbittorrent` / `seerr` / `byparr` / `configarr` / `ofelia`** — the arr stack.
+- **`tdarr`** — post-import track cleanup on the movie/series library. Not in the `arr` alias. See `## Tdarr`.
 - **`pihole`** — deliberately standalone: macvlan compose in `pi-hole/` with its
   own `.env` (auto-read, no `--env-file`), own LAN IP `192.168.0.53`.
   `nas configure` and the read-only verbs cover it; the lifecycle verbs refuse
@@ -27,7 +28,7 @@ units:
 Bring-up order: `nas-net` first (script-managed, owned by no compose file),
 then any unit in any order — nothing hard-depends on another unit being up.
 The known cross-unit couplings live in the CLI, never in a compose file:
-configarr's extra `--env-file` flags and `--no-start`, ofelia's "ensure the
+configarr's and tdarr's extra `--env-file` flags, configarr's `--no-start`, ofelia's "ensure the
 configarr container exists" (see `## Arr`), and the jellyfin→homepage
 widget-key recreate (see `## Jellyfin`).
 
@@ -69,6 +70,8 @@ widget-key recreate (see `## Jellyfin`).
   file (ports, config dirs, `RENDER_GID`, indexer lists, `ARR_MOVIES_DIR`/
   `ARR_SERIES_DIR`/`ARR_MUSIC_DIR`, etc.) — the same "single-consumer stays
   local" rule `shared.env` itself follows in reverse.
+- `tdarr-plugins/` — the Tdarr plugin that keeps original audio + chosen
+  subtitles, mounted read-only into the container (not a template).
 - `homepage-config/`, `qbittorrent-config/`, `configarr-config/` — config
   templates that `nas install` copies only when absent, so on-NAS edits
   survive. `qBittorrent.conf` additionally gets its `__PLACEHOLDER__` tokens
@@ -121,7 +124,7 @@ Run this on the NAS and paste the output:
 - PUID/PGID `1000:10`. `RENDER_GID=105` (Intel iGPU, `/dev/dri/renderD128`). `TZ=Europe/Bucharest`.
 - LAN IP `192.168.0.231` (DHCP reservation), `apollo.local` via mDNS.
 - Bind-mount sources are **not** auto-created with correct ownership — `nas install` mkdir+chowns them, which is one reason it needs root.
-- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`8686`/`9696`/`8080` → Sonarr/Radarr/Lidarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr. `0.0.0.0:53` free → PiHole. UGOS on 9999.
+- Ports: `80` → Homepage (bound directly). `8096`/`7359`/`1900` → Jellyfin (host networking). `8989`/`7878`/`8686`/`9696`/`8080` → Sonarr/Radarr/Lidarr/Prowlarr/qBittorrent, `6881` tcp+udp torrent, `5055` → Seerr, `8265` → Tdarr. `0.0.0.0:53` free → PiHole. UGOS on 9999.
 - Docker daemon API `1.54` — pin images to exact patch versions and check compatibility against this.
 - Compose files must not hardcode host paths — all via `.env` (gitignored; `shared.env.example` / `<unit>.env.example` are the templates).
 
@@ -254,3 +257,11 @@ Homepage binds host `:80`, so `apollo.local` opens the dashboard; every other se
 - **`seerr-bootstrap.sh` must run after `arr-bootstrap.sh`** — it binds requests to the TRaSH profiles (`WEB-1080p` / `HD Bluray + WEB`) that configarr creates, falling back to the first profile with a warning. **A failure that cannot be distinguished from a deliberate skip is the bug**: it exits non-zero (`1` precondition, `22` API) and prints the state it saw, and `nas install` defers that rc — stack stays up, banner in the summary, non-zero exit. `SEERR_CONFIGURE=0` is the deliberate skip and stays exit 0.
 - **It reads four env files**: `shared.env` for `ADMIN_USER`/`ADMIN_PASSWORD` and `LAN_HOST`, `seerr.env` for its own key and settings, and `sonarr.env`/`radarr.env` for their keys and root folders. Each path resolves `./`-prefixed for a bare filename, so a run from another cwd cannot silently read nothing; the usual `*_ENV_FILE` variables override each one. `ADMIN_PASSWORD` is a required var for jellyfin, qbittorrent **and** seerr, so a seerr-only `nas install` stops at the wizard pointer instead of stalling on an empty password.
 - `GET /settings/jellyfin/library?enable=` **replaces** the enabled set — any library not listed is disabled — so the bootstrap only touches it pre-initialize.
+
+## Tdarr
+
+- **Never mount the download tree into Tdarr.** It rewrites files in place; the library is safe to rewrite only because imports are cross-filesystem copies, not the seeding file (spec §8 Tdarr).
+- **The plugin finds a file's movie/series by path prefix, so Tdarr's media mounts must keep the exact container paths Radarr/Sonarr use** (`/media/movies`, `/media/series`). Change one side and every file is skipped as "no arr item".
+- **The plugin takes config from the container environment only** — never add plugin inputs for keys or URLs (they'd be copies in Tdarr's database). API failures throw on purpose; don't turn them into skips (spec §8 Tdarr).
+- **Its libraries live in its database, set in the web UI** — no compose var or env file configures them, and `nas recreate tdarr` starts from an empty database. Any library setting that polls or re-scans on a schedule wakes the HDD; don't propose one.
+- Sized for remuxing (one CPU worker, no `/dev/dri`). A flow that re-encodes is a different unit shape — revisit both before adding one.

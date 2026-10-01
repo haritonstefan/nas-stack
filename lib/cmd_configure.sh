@@ -477,31 +477,36 @@ wiz_stage_admin_password() {
 
 # Media directories asked once and staged into every consumer: the jellyfin
 # MEDIA_*_DIR and the arr units' ARR_*_DIR are separate files holding the
-# same underlying host path, and must stay identical.
+# same underlying host path, and must stay identical. tdarr's TDARR_*_DIR
+# joins the same rule.
 wiz_media_dirs_section() {
-  { want jellyfin || want radarr || want sonarr || want lidarr; } || return 0
+  { want jellyfin || want radarr || want sonarr || want lidarr || want tdarr; } || return 0
   say "Media libraries (pre-existing — never created or chowned by install)"
 
-  if want jellyfin || want radarr; then
+  if want jellyfin || want radarr || want tdarr; then
     local cur=""
     if want jellyfin; then cur=$(wiz_get jellyfin MEDIA_MOVIES_DIR)
-    else cur=$(wiz_get radarr ARR_MOVIES_DIR)
+    elif want radarr; then cur=$(wiz_get radarr ARR_MOVIES_DIR)
+    else cur=$(wiz_get tdarr TDARR_MOVIES_DIR)
     fi
     wiz_ask "Movies directory" "$cur" is_abs_dir
     [ -d "$REPLY_VALUE" ] || warn "does not exist yet — that library will start empty"
     want jellyfin && stage jellyfin MEDIA_MOVIES_DIR "$REPLY_VALUE"
     want radarr   && stage radarr   ARR_MOVIES_DIR   "$REPLY_VALUE"
+    want tdarr    && stage tdarr    TDARR_MOVIES_DIR "$REPLY_VALUE"
   fi
 
-  if want jellyfin || want sonarr; then
+  if want jellyfin || want sonarr || want tdarr; then
     local cur=""
     if want jellyfin; then cur=$(wiz_get jellyfin MEDIA_SERIES_DIR)
-    else cur=$(wiz_get sonarr ARR_SERIES_DIR)
+    elif want sonarr; then cur=$(wiz_get sonarr ARR_SERIES_DIR)
+    else cur=$(wiz_get tdarr TDARR_SERIES_DIR)
     fi
     wiz_ask "Series directory" "$cur" is_abs_dir
     [ -d "$REPLY_VALUE" ] || warn "does not exist yet — that library will start empty"
     want jellyfin && stage jellyfin MEDIA_SERIES_DIR "$REPLY_VALUE"
     want sonarr   && stage sonarr   ARR_SERIES_DIR   "$REPLY_VALUE"
+    want tdarr    && stage tdarr    TDARR_SERIES_DIR "$REPLY_VALUE"
   fi
 
   if want jellyfin || want lidarr; then

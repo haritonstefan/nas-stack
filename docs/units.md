@@ -28,6 +28,7 @@ Uniform conventions (every unit, unless its row says otherwise):
 | byparr | — (no port, no tile) | — (stateless: no volumes, no vars of its own) | — | — | — |
 | configarr | — | `CONFIGARR_CONFIG_DIR`, `CONFIGARR_REPOS_DIR` | — | `configarr-config/config.yml` → config dir | required (cross-unit, via extra env files): `SONARR_API_KEY`, `RADARR_API_KEY` |
 | ofelia | — | `OFELIA_CONFIG_DIR` | — | `configarr-config/ofelia.ini` → config dir | — |
+| tdarr | 8265 (`TDARR_WEBUI_PORT`) | `TDARR_DATA_DIR/{server,configs,logs,cache}` — delete target is `TDARR_DATA_DIR` | `TDARR_MOVIES_DIR`, `TDARR_SERIES_DIR` (exists + writable) | — | required (cross-unit, via extra env files): `SONARR_API_KEY`, `RADARR_API_KEY` |
 | pihole | — (standalone; NAS can't reach it) | — (compose-relative bind `./etc-pihole`) | — | — | required: `PIHOLE_PASSWORD` (hand-set, own credential — P4) |
 
 **Downloads trio**: when any of sonarr / radarr / lidarr / qbittorrent is selected,
@@ -68,6 +69,14 @@ first post-install.
   present yet, warn and skip — never fail.
 - Ad-hoc syncs use a throwaway `--name configarr-sync` / `configarr-dryrun` via
   `compose run --rm`, so they never collide with the scheduler-target container.
+
+## tdarr
+
+- Env files, in order: `shared.env sonarr.env radarr.env tdarr.env` — same reason as
+  configarr: the plugin needs both keys and reads them from their owners' files.
+- `tdarr-plugins/` is a compose-relative `:ro` bind onto `/app/server/Tdarr/Plugins/Local`,
+  not a template: the repo is its only home, and a `git pull` reaches the container
+  without a reinstall.
 
 ## qBittorrent first-boot seed
 

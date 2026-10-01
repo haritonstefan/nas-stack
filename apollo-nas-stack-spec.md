@@ -36,6 +36,7 @@ tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 | 8080 | qBittorrent web UI |
 | 6881 tcp+udp | qBittorrent torrent traffic |
 | 5055 | Seerr |
+| 8265 | Tdarr web UI (8266, its server port, stays unpublished) |
 | — | PiHole claims no host port: macvlan gives it its own LAN IP (`192.168.0.53`, see `docs/pihole-spec.md`) |
 
 Publishing ports is the design. Every user-facing service claims a host port and is linked
@@ -196,6 +197,7 @@ never as separate partial bodies.
 │   ├── config/             # config.yml, installed by nas install when absent
 │   └── repos/              # cached TRaSH + Recyclarr template clones
 ├── ofelia/config/          # ofelia.ini — the configarr sync schedule
+├── tdarr/                  # server/ (database, plugins), configs/, logs/, cache/
 └── downloads/              # torrents seed from here; never a nas destroy target
     ├── incomplete/
     └── complete/
@@ -203,8 +205,8 @@ never as separate partial bodies.
 
 ```
 /volume1/Media/             # HDD — library root
-├── Movies/                 # :ro into Jellyfin, rw into Radarr
-├── Series/                 # :ro into Jellyfin, rw into Sonarr
+├── Movies/                 # :ro into Jellyfin, rw into Radarr and Tdarr
+├── Series/                 # :ro into Jellyfin, rw into Sonarr and Tdarr
 └── Music/                  # :ro into Jellyfin, rw into Lidarr
 ```
 
@@ -396,6 +398,48 @@ music requests. Its API is v1, like Prowlarr's, not v3.
   inside containers. Seerr has no credential of its own either — its admin account IS the
   Jellyfin admin account, signed in via `/auth/jellyfin` using `shared.env`'s `ADMIN_USER`/
   `ADMIN_PASSWORD`, the same identity qBittorrent's WebUI uses.
+
+### Tdarr
+
+Post-import cleanup of the movie and series library: it remuxes each file to drop
+unwanted audio and subtitle tracks (stream copy, no re-encode). It is its own unit,
+outside the `arr` alias — nothing in the arr wiring calls it, and `nas destroy arr`
+should not take its database with it.
+
+- **It mounts the library read-write and never the download tree.** Tdarr replaces the
+  original file in place. Imports are cross-filesystem copies (section 6), so the library
+  file and the seeding file are different inodes — rewriting one cannot corrupt the other.
+  Mounting `/downloads` would remove that guarantee.
+- **The cache (`/temp`) is on the SSD.** The rewritten file is built there and then
+  replaces the original, so the HDD reads the source once and writes the result once. It
+  needs free space for the largest file in flight.
+- **One CPU worker, no GPU.** A remux is disk-bound, and a second parallel job only makes
+  the HDD seek between two files. `/dev/dri` is not passed through because nothing
+  re-encodes. Enabling transcoding would mean revisiting both.
+- **The rule lives in a repo-owned plugin**, `tdarr-plugins/Tdarr_Plugin_nas_keep_original_audio.js`,
+  mounted read-only as Tdarr's `Plugins/Local`. It keeps the audio tracks in the title's
+  original language and the subtitles in `TDARR_SUBTITLE_LANGS`, and removes the rest by
+  stream copy. The original language is `originalLanguage` on the Radarr movie / Sonarr
+  series whose `path` prefixes the file's path — which only works because Tdarr mounts the
+  library at the same container paths as Radarr and Sonarr (`/media/movies`,
+  `/media/series`).
+- **The plugin is configured by environment, not plugin inputs.** Inputs live in Tdarr's
+  database, so an API key typed there is a copy that goes stale when the key rotates. The
+  keys come from `sonarr.env`/`radarr.env` via extra `--env-file` flags, like configarr.
+- **It fails safe.** No audio track tagged in the original language → audio untouched.
+  Untagged/`und` tracks → kept. Empty `TDARR_SUBTITLE_LANGS` → subtitles untouched. A
+  language outside its table, or a file no arr item owns → skipped. An API failure
+  *throws* rather than skipping, because Tdarr never revisits a file it marked "not
+  required" — an outage must not look like a deliberate skip. Already-clean files are a
+  no-op, so the re-scan after a rewrite does not loop.
+- **Libraries live in Tdarr's database** (`/app/server`), set in its web UI. The repo seeds
+  none of it, and `nas recreate tdarr` starts from an empty database. Per library: source
+  `/media/movies` (or `/media/series`), transcode cache `/temp`, output written over the
+  original, classic plugin stack with the Local plugin `Tdarr_Plugin_nas_keep_original_audio`.
+  Nothing configured may poll or re-scan the library on a schedule — the HDD stays asleep
+  at idle (section 6). A new library's first scan queues every existing file.
+- Identity via `PUID`/`PGID` env like the LSIO images, but the umask variable is
+  `UMASK_SET`, Tdarr's own name. Tdarr's optional auth stays off: the box is LAN-only.
 
 ### Secrets, and what actually lives in shared.env
 
