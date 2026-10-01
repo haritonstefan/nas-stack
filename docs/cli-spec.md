@@ -278,6 +278,13 @@ summary; it never aborts the other units.
 - `unit_templates` — replaces the default copy-when-absent template step.
   qbittorrent only: placeholder substitution + the leftover-token assert
   (docs/units.md §qBittorrent first-boot seed).
+- `unit_adopt` — called instead of `compose up` when a container with the unit's
+  name already exists under another compose project (or none), which `up` would
+  otherwise fail on as a name clash. Without the hook that case fails the unit
+  with the move-over command (`nas destroy <unit> --containers`, then `nas
+  install <unit>`). qbittorrent only: keeps an existing container seeding —
+  refuses unless its `/config` and `/downloads` mounts match the env, attaches it
+  to `nas-net` if needed, starts it if stopped.
 - `unit_post_install` — only for needs beyond the `UNIT_POST_INSTALL` driver
   (none today; the family-users feature lands here). Driver exit codes pass
   through untouched (10/22 semantics).

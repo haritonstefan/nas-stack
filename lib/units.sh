@@ -93,7 +93,7 @@ unit_load() {
   UNIT_LOG_PATHS=""
   UNIT_POST_INSTALL=""
   UNIT_STANDALONE=0
-  unset -f unit_configure unit_templates unit_post_install unit_destroy_plan unit_doctor 2>/dev/null || true
+  unset -f unit_configure unit_templates unit_adopt unit_post_install unit_destroy_plan unit_doctor 2>/dev/null || true
   # shellcheck disable=SC1090
   . "units/${unit}.sh"
 }
