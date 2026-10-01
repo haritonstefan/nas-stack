@@ -39,7 +39,7 @@ has two standing consequences:
   `pihole_macvlan` network (not `external:`, unlike every nas-net unit), `.env` is read
   automatically by compose from the same directory — no `--env-file` flags, no
   `-p` juggling, no involvement of the shared lifecycle verbs. Exact image pin
-  (`pihole/pihole:2025.08.0` — **verify** the tag exists and check against daemon API
+  (`pihole/pihole:2026.09.0` — **verify** the tag exists and check against daemon API
   1.54), `container_name: pihole`, capped json-file logging, config bind at
   `/volume2/docker/pihole` → `/etc/pihole`, all host facts via `.env`
   (`MACVLAN_PARENT`, `LAN_SUBNET`, `LAN_GATEWAY`, `PIHOLE_IP`).
@@ -103,7 +103,7 @@ its unit file — `docs/cli-spec.md` §Code layout):
   would let the NAS (and Homepage's widget) reach `.53`. Worth it only if the widget is
   missed; adds a boot-time host config step that survives nothing UGOS reprovisions.
   **Verify** UGOS tolerates it before speccing.
-- **verify on first bring-up:** `pihole/pihole:2025.08.0` exists; macvlan on
+- **verify on first bring-up:** `pihole/pihole:2026.09.0` exists; macvlan on
   `parent: bridge0` passes traffic on UGOS (some bridge setups need promiscuous mode on
   the parent); `.53` answers from a LAN client (`dig @192.168.0.53 example.com`) and
   from the NAS it deliberately does *not*.

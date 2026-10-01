@@ -6,7 +6,7 @@ services:
   # units, an auto-started sync would race Sonarr/Radarr's startup and fail at
   # every bring-up. Naming the service on the command line enables the profile.
   configarr:
-    image: ghcr.io/raydak-labs/configarr:1.30.2
+    image: ghcr.io/raydak-labs/configarr:1.33.0
     container_name: configarr
     # Not unless-stopped: a restart policy makes the daemon respawn a
     # run-to-completion container about once a minute.

@@ -220,7 +220,7 @@ if [ "$SCAN_ONLY" -eq 0 ] && [ "$WIZARD_DONE" = "false" ]; then
 
   # LAN-only server; no UPnP port mapping.
   api POST /Startup/RemoteAccess \
-    '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}' >/dev/null
+    '{"EnableRemoteAccess":true}' >/dev/null
 
   api POST /Startup/Complete >/dev/null
   echo "    wizard completed"

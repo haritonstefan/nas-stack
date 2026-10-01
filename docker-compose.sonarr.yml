@@ -1,6 +1,6 @@
 services:
   sonarr:
-    image: linuxserver/sonarr:4.0.19.2979-ls321
+    image: linuxserver/sonarr:4.0.20.3014-ls326
     container_name: sonarr
     restart: unless-stopped
     # LinuxServer.io images take identity as environment and usermod internally,

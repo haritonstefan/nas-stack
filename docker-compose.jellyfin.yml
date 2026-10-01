@@ -1,6 +1,7 @@
 services:
   jellyfin:
-    image: jellyfin/jellyfin:10.11.11
+    # The dated tag, not `12.1`: Jellyfin rebuilds the short tags in place.
+    image: jellyfin/jellyfin:12.1.20260915-010956
     container_name: jellyfin
     restart: unless-stopped
     # Required for SSDP/broadcast discovery; `ports:` does not apply and must

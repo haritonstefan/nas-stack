@@ -1,6 +1,6 @@
 services:
   qbittorrent:
-    image: linuxserver/qbittorrent:5.2.3_v2.0.14-ls472
+    image: linuxserver/qbittorrent:5.2.4_v2.0.15-ls479
     container_name: qbittorrent
     restart: unless-stopped
     environment:

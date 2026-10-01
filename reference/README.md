@@ -5,25 +5,29 @@ probing a live service.
 
 ## `jellyfin-openapi.json`
 
-Jellyfin's OpenAPI spec, fetched from the running server — the only copy
-guaranteed to match the deployed binary:
+Jellyfin's OpenAPI spec for the pinned release (currently 12.1.0). Jellyfin
+publishes one file per release, so it can be vendored before the image is ever
+deployed:
+
+```sh
+curl -sSfL https://repo.jellyfin.org/files/openapi/stable/jellyfin-openapi-12.1.json -o reference/jellyfin-openapi.json
+jq -r '.info.version' reference/jellyfin-openapi.json   # must match the pinned image (12.1.0)
+```
+
+Once the image runs, the server's own copy is the final word on what the binary
+serves. Refresh from it and expect no diff:
 
 ```sh
 curl -sS http://apollo.local:8096/api-docs/openapi.json -o reference/jellyfin-openapi.json
-jq -r '.info.version' reference/jellyfin-openapi.json   # must match the pinned image (10.11.11)
 ```
 
-**Version trap on refresh:** the upstream published spec
-(`api.jellyfin.org/openapi/jellyfin-openapi-stable.json`) reports
-`info.version: 12.0.0` — the version of the *spec document*, not of Jellyfin;
-the server line is 10.x and there is no Jellyfin 12. If `.info.version` ever
-reads `12.0.0`, this file came from upstream rather than the server and runs
-**ahead** of what is deployed: treat it as a hint, not proof. (The known
-disagreement: `POST /Startup/User` is documented with no 404 response, yet 404s
-on a fresh config when `GET /Startup/User` has not run first — see CLAUDE.md.)
+Don't use `api.jellyfin.org/openapi/jellyfin-openapi-stable.json`: it follows
+whatever upstream calls stable, not the pinned tag. The spec isn't complete
+evidence either way: `POST /Startup/User` is documented with no 404, yet it
+404s on a fresh config when `GET /Startup/User` hasn't run first (see CLAUDE.md).
 
-**Don't read this file with WebFetch or `Read`** — it's ~1.9MB on one line, so
-it truncates alphabetically, before `/Startup`. Query it with `jq`:
+**Don't read this file with WebFetch or `Read`.** At ~1.9MB it gets cut off
+before `/Startup`. Query it with `jq`:
 
 ```sh
 # every path under a tag, with its verbs

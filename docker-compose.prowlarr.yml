@@ -1,6 +1,6 @@
 services:
   prowlarr:
-    image: linuxserver/prowlarr:2.5.2.5491-ls156
+    image: linuxserver/prowlarr:2.6.5.5623-ls162
     container_name: prowlarr
     restart: unless-stopped
     environment:
