@@ -6,8 +6,8 @@
 # -p nas-<unit> are required on every call, or the units collapse into one
 # project and report each other as orphans.
 
-compose_env_flags() { # only files that exist: configarr's down still needs
-  local f flags=""     # sonarr.env/radarr.env to interpolate, when present
+compose_env_flags() { # only the files that exist
+  local f flags=""
   for f in $UNIT_ENV_FILES; do
     [ -f "$f" ] && flags="${flags} --env-file ${f}"
   done
@@ -40,8 +40,7 @@ compose_up_unit() {
     warn "move it over (config and data dirs are kept): sudo ./nas destroy ${UNIT_NAME} --containers && sudo ./nas install ${UNIT_NAME}"
     return 1
   fi
-  # shellcheck disable=SC2086
-  compose_unit up -d $UNIT_UP_ARGS
+  compose_unit up -d
 }
 
 # foreign_owner <container> — prints the compose project that owns it; fails
@@ -54,8 +53,7 @@ foreign_owner() {
 }
 
 compose_down_unit() {
-  # shellcheck disable=SC2086
-  compose_unit $UNIT_DOWN_ARGS down --remove-orphans
+  compose_unit down --remove-orphans
 }
 
 ensure_nas_net() {

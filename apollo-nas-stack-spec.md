@@ -5,6 +5,12 @@ Target state of the system and the constraints behind it.
 **Homepage is the entrypoint; everything else is reached on its own port by clicking a
 tile.** Plain HTTP, one name (`apollo.local`), no custom DNS.
 
+A fresh clone reproduces the containers and their wiring: network, mounts, ports,
+identities, API keys and dashboard tiles. It does not reproduce what lives inside each
+service (libraries, download clients, indexers, plugins). That is set up by hand in each
+service's own UI; the settings that are easy to get wrong are listed in
+`docs/manual-setup.md`.
+
 ---
 
 ## 1. Hardware and platform
@@ -106,6 +112,9 @@ No internal/backend network — nothing runs a database yet. Add one when someth
 
 ## 5. Jellyfin
 
+The settings below that live inside Jellyfin (base URL, QSV, DLNA, network settings) are
+applied by hand; the exact values are in `docs/manual-setup.md`.
+
 ### Host networking
 
 DLNA uses **SSDP multicast on 1900**; Jellyfin's client auto-discovery uses **broadcast on
@@ -117,42 +126,36 @@ so neither reaches a bridged container — discovery does not work behind a brid
 Constraints that follow:
 
 - `network_mode: host` **ignores `ports:`** — never add that block.
-- Jellyfin is not on `nas-net` and has no container-name resolution. Nothing needs it.
+- Jellyfin is not on `nas-net` and has no container-name resolution. Anything that talks
+  to it (Homepage's widget, Seerr) uses the LAN IP, `shared.env`'s `LAN_HOST`.
 - It forfeits Docker network isolation — the one documented exception to bridge-by-default.
 - Homepage still discovers its tile: labels are read over the **Docker socket API, not the
   network**.
 
 ### Base URL stays empty
 
-Jellyfin serves from the root of `:8096`, so `BaseUrl` must stay empty.
-`jellyfin-bootstrap.sh` asserts this last, clearing it if anything set it: a non-empty
-value relocates the **entire API** under that prefix, so no call may follow. Changing it
-needs a container restart.
+Jellyfin serves from the root of `:8096`, and every tile, widget URL and Seerr's
+connection assume it. A non-empty base URL relocates the **entire API** under that prefix
+and breaks all of them at once. Changing it needs a container restart.
 
 ### GPU passthrough
 
 `RENDER_GID=105`, passed via `group_add`, with `/dev/dri/renderD128` in `devices:`. Confirm
-rather than copy if the host changes:
+rather than copy if the host changes (`nas doctor jellyfin` compares the two):
 
 ```bash
 stat -c '%g %G' /dev/dri/renderD128
 ```
 
-`jellyfin-bootstrap.sh` configures QSV (hardware decode + encode, low-power H.264/HEVC).
-Verify with `intel_gpu_top` during an actual transcode — a config value alone proves
-nothing.
+The passthrough only makes the device visible. QSV itself is switched on in Jellyfin's
+transcoding settings. Verify with `intel_gpu_top` during an actual transcode — a config
+value alone proves nothing.
 
 ### DLNA
 
 DLNA is a **plugin** as of Jellyfin 10.10, not core. Until it is installed *and loaded*,
-DLNA browsing does not work regardless of networking.
-
-`jellyfin-bootstrap.sh` installs it over the API rather than through the dashboard: it
-resolves the entry in `GET /Packages` (the display name is never hardcoded), posts to
-`/Packages/Installed/{name}`, then polls `GET /Plugins` — the install is asynchronous, so
-the `204` means *queued*, not installed. Jellyfin does not hot-load plugins, so a new one
-reports `Status: Restart` and is activated by the deferred restart the base URL already
-uses, rather than a restart mid-bootstrap. `JELLYFIN_INSTALL_DLNA=0` skips the step.
+DLNA browsing does not work regardless of networking. Jellyfin does not hot-load plugins,
+so a newly installed one does nothing until the container restarts.
 
 DLNA has no authentication — anything on the LAN can browse exposed libraries. The TV and
 NAS must be on the **same layer-2 segment**; multicast does not cross VLANs, and many APs
@@ -160,22 +163,14 @@ block it by default. That is the most common cause of DLNA not appearing.
 
 ### Jellyfin's own network settings
 
-All three live on the same `NetworkConfiguration` object, which deserializes over
-the whole object — so `jellyfin-bootstrap.sh` sets them in one GET-modify-POST,
-never as separate partial bodies.
-
-- **LAN networks**: restricted to the local subnet (`JELLYFIN_LOCAL_SUBNET`,
-  `192.168.0.0/24`). This is what Jellyfin uses to decide which clients are local,
-  which gates LAN-only behaviour like bitrate limits and DLNA visibility.
-  **This reclassifies tailnet clients as remote** (§9): left empty, Jellyfin infers
-  local networks from its own interfaces, and host networking meant that included
-  the tailscale interface. They still connect — remote access is enabled — but a
-  remote-bitrate limit added later would apply to tailnet playback too.
-- **Known proxies**: none — nothing proxies Jellyfin, and a stray entry would make
-  it trust `X-Forwarded-For` from anyone. Set explicitly to empty rather than left
-  at the default.
-- **Base URL**: empty, settled **last** within that single POST — see "Base URL
-  stays empty" above.
+- **LAN networks** are set to the local subnet. This is what Jellyfin uses to decide which
+  clients are local, which gates LAN-only behaviour like bitrate limits and DLNA
+  visibility. Left empty, Jellyfin infers local networks from its own interfaces, and
+  host networking means that includes the tailscale interface (§9). With the subnet set,
+  tailnet clients count as remote. They still connect, but a remote-bitrate limit would
+  apply to tailnet playback too.
+- **Known proxies** stay empty. Nothing proxies Jellyfin, and a stray entry would make it
+  trust `X-Forwarded-For` from anyone.
 
 ---
 
@@ -185,18 +180,14 @@ never as separate partial bodies.
 /volume2/docker/            # SSD — all container config and logs
 ├── homepage/config/
 ├── jellyfin/
-│   ├── config/             # SQLite databases
+│   ├── config/             # SQLite databases, logs in log/
 │   └── cache/              # transcode scratch
 ├── sonarr/config/
 ├── radarr/config/
 ├── lidarr/config/
 ├── prowlarr/config/
-├── qbittorrent/config/     # qBittorrent.conf, seeded once by nas install
+├── qbittorrent/config/     # qBittorrent.conf, written by qBittorrent itself
 ├── seerr/config/           # settings.json + SQLite; users and request history
-├── configarr/
-│   ├── config/             # config.yml, installed by nas install when absent
-│   └── repos/              # cached TRaSH + Recyclarr template clones
-├── ofelia/config/          # ofelia.ini — the configarr sync schedule
 ├── unmanic/                # config/ (database, plugins, logs in .unmanic/), cache/
 └── downloads/              # torrents seed from here; never a nas destroy target
     ├── incomplete/
@@ -222,17 +213,17 @@ is the intended trade:
 - Seeding runs entirely off the SSD, so a seeding torrent never holds the media HDD awake —
   the same rule that keeps config off `/volume1`.
 - Cost: transient 2× space for the file being imported, one cross-filesystem copy per import,
-  and `copyUsingHardlinks` is asserted in Sonarr/Radarr but inert.
-- The SSD would fill without a bound, so qBittorrent stops torrents at ratio 2.0 or 14 days
-  and the arr apps then delete them *and their content*. That hand-off is the only thing
-  draining the tree; see section 8.
+  and the arr apps' "use hardlinks" setting does nothing.
+- The SSD would fill without a bound, so qBittorrent stops torrents at a seed cap and the
+  arr apps then delete them *and their content*. That hand-off is the only thing draining
+  the tree; see section 8.
 
 The alternative — download tree under `/volume1` next to `Media/` — buys instant hardlinked
 imports and no duplicate space, at the cost of keeping the HDD awake for as long as anything
 is seeding. Moving `DOWNLOADS_DIR` is the whole change if that trade ever looks better.
 
-Note this is a deliberate departure from the TRaSH guides' single-`/data`-mount
-recommendation, which exists precisely to make hardlinks work.
+This is a deliberate departure from the TRaSH guides' single-`/data`-mount recommendation,
+which exists precisely to make hardlinks work.
 
 Compose files must not hardcode these paths — they come from `shared.env` (for `DOWNLOADS_DIR`,
 which sonarr, radarr, lidarr and qbittorrent all read identically) or a `<unit>.env` (for a
@@ -323,6 +314,7 @@ When this fails, **no container is listed at all** and Homepage renders only
 `services.yaml` — it looks like one service being ignored, not a dead integration.
 Diagnose by mechanism: `ENOENT` means the path is wrong, `EACCES` means the socket was
 found and refused.
+
 Homepage is the front door for every browser on the LAN: pin it, update deliberately.
 
 ---
@@ -359,20 +351,18 @@ No routing config, no name registration — publish the port, add the labels.
 
 Sonarr, Radarr, Lidarr, Prowlarr and qBittorrent, plus Seerr (the request front-end — users
 sign in with their Jellyfin account, request media, and Seerr forwards to Sonarr/Radarr and
-tracks availability), Byparr (no published port, so no tile — the Cloudflare solver,
-replacing FlareSolverr, which stopped clearing modern managed challenges; same API, so
-Prowlarr registers it as a FlareSolverr-type indexer proxy), Configarr (no port,
-run-to-completion) and Ofelia (the scheduler that starts it). Each is its own compose
-project (`docker-compose.<unit>.yml`, `-p nas-<unit>`) — there is no single `arr` compose
-file, no `depends_on`, and no shared volume between them; `arr` is a convenience alias the
-CLI expands to all nine. All bridge services on `nas-net` (created by `nas install`, joined
-as `external: true`); only Jellyfin needs host networking.
+tracks availability) and Byparr (the Cloudflare solver; no published port, so no tile). Each
+is its own compose project (`docker-compose.<unit>.yml`, `-p nas-<unit>`) — there is no
+single `arr` compose file, no `depends_on`, and no shared volume between them; `arr` is a
+convenience alias the CLI expands to all seven. All bridge services on `nas-net`; only
+Jellyfin needs host networking.
 
-Lidarr is the music arr, same shape as Sonarr/Radarr with two deliberate differences:
-it sits **outside configarr/TRaSH scope** (the frozen Recyclarr template tree has no
-Lidarr profiles and configarr's Lidarr support is experimental, so its default quality
-profiles stand until that changes), and it has **no Seerr wiring** — Seerr does not do
-music requests. Its API is v1, like Prowlarr's, not v3.
+Byparr replaced FlareSolverr, which stopped clearing modern managed challenges. It speaks
+the same API, so Prowlarr registers it as a FlareSolverr-type indexer proxy
+(`docs/manual-setup.md`).
+
+Lidarr is the music arr, same shape as Sonarr/Radarr. It has no Seerr wiring — Seerr does
+not do music requests, so music is requested in Lidarr itself.
 
 - Media is mounted **read-write** here, unlike Jellyfin's `:ro`. Sonarr, Radarr and Lidarr
   each see only the tree they manage (`/media/series`, `/media/movies`, `/media/music`), and
@@ -389,23 +379,36 @@ music requests. Its API is v1, like Prowlarr's, not v3.
   socket access; none of these containers touch the socket. `UMASK=002` keeps what they write
   group-readable for Jellyfin, which runs as the same `1000:10`.
 - **Seerr is the exception to the previous point** — not an LSIO image (runs as `node`, 1000),
-  so it takes compose `user:` like Configarr and Ofelia. Its API key is injected as the
-  `API_KEY` environment variable, which Seerr writes over the `apiKey` stored in its
-  `settings.json` at **every** start — same never-persisted idiom as the arr keys, and it means
-  a key rotated in the Seerr UI does not survive a restart. It reaches Sonarr/Radarr by
-  container name over `nas-net`, but Jellyfin at the host LAN address (`shared.env`'s
-  `LAN_HOST`): Jellyfin is host-networked and not on `nas-net`, and mDNS does not resolve
-  inside containers. Seerr has no credential of its own either — its admin account IS the
-  Jellyfin admin account, signed in via `/auth/jellyfin` using `shared.env`'s `ADMIN_USER`/
-  `ADMIN_PASSWORD`, the same identity qBittorrent's WebUI uses.
+  so it takes compose `user:`. Its API key is injected as the `API_KEY` environment variable,
+  which Seerr writes over the `apiKey` stored in its `settings.json` at **every** start —
+  same never-persisted idiom as the arr keys, and it means a key rotated in the Seerr UI
+  does not survive a restart. It reaches Sonarr/Radarr by container name over `nas-net`, but
+  Jellyfin at `LAN_HOST`: Jellyfin is host-networked and not on `nas-net`, and mDNS does not
+  resolve inside containers. Seerr keeps no credential of its own — its admin is whichever
+  Jellyfin account signs in first.
+
+### The seed cap: qBittorrent stops, the arr apps delete
+
+qBittorrent **stops** a torrent at its seed cap and deletes nothing. The arr apps' download
+clients have "Remove Completed" on, and they remove a torrent — *with* its files — only once
+qBittorrent reports it stopped at the cap: never mid-seed, never before import.
+
+The alternative, qBittorrent removing torrent and content at the cap, frees the same space
+but can delete a download the arr app has not imported yet. The arr apps refuse to save a
+download client pointing at a qBittorrent set that way, so the pairing is enforced by their
+own validation. The exact settings are in `docs/manual-setup.md`.
+
+Accepted costs: torrents added outside the arr apps (or in a foreign category) stop at the
+cap but are never deleted, and a failed import holds its data on the SSD until resolved in
+the Activity queue rather than being silently reaped.
 
 ### Unmanic
 
 Post-import cleanup of the movie and series library: it remuxes each file to drop
 unwanted audio and subtitle tracks (stream copy, no re-encode). It is its own unit,
-outside the `arr` alias — nothing in the arr wiring calls it, and `nas destroy arr`
-should not take its database with it. It replaced Tdarr, whose rule had to live in a
-plugin this repo wrote and maintained; Unmanic's community plugins already do the job.
+outside the `arr` alias — nothing in the arr stack calls it, and `nas destroy arr`
+should not take its database with it. Worker, libraries and plugins are set up by hand
+(`docs/manual-setup.md`); the reasons behind those settings are below.
 
 - **It mounts the library read-write and never the download tree.** Unmanic replaces
   the original file in place. Imports are cross-filesystem copies (section 6), so the
@@ -417,36 +420,24 @@ plugin this repo wrote and maintained; Unmanic's community plugins already do th
 - **One worker, no GPU.** A remux is disk-bound, and a second parallel job only makes
   the HDD seek between two files. `/dev/dri` is not passed through because nothing
   re-encodes. Enabling transcoding would mean revisiting both. A fresh Unmanic ships
-  with **zero** workers, so the bootstrap's worker write is what makes it process at all.
-- **Two community plugins, pinned.** Audio: `unmanic_plugin_keep_original_language_audio`
-  (MatthijsSmets, 1.0.0) looks up `originalLanguage` on the Radarr movie / Sonarr series
-  whose path prefixes the file's path, and removes audio in other languages. Subtitles:
-  `keep_stream_by_language` (yajrendrag, 0.3.3) with audio set to `*` keeps only the
-  subtitles in `UNMANIC_SUBTITLE_LANGS`. Community repos always serve their latest
-  build, so `unmanic-bootstrap.sh` installs each from a zip at a fixed commit, checked
-  against a sha256 — the same reason every image is pinned.
+  with **zero** workers and processes nothing until one is added.
+- **Two community plugins.** Audio: `keep_original_language_audio` looks up
+  `originalLanguage` on the Radarr movie / Sonarr series whose path prefixes the file's
+  path, and removes audio in other languages. Subtitles: `keep_stream_by_language` keeps
+  only the subtitles in the listed languages. An empty list there means "keep none", not
+  "keep all".
 - **The path match only works because the container paths are shared.** Unmanic mounts
   the library at `/media/movies` and `/media/series`, exactly like Radarr and Sonarr, so
-  the audio plugin needs no path mapping. Change one side and every file is skipped.
+  the audio plugin needs no path mapping. Change one side and every file is skipped,
+  silently.
 - **It fails safe.** Any failure of the audio lookup — Radarr/Sonarr down, no matching
   item, no original language, no audio track tagged in it — leaves the file unchanged,
-  and neither plugin ever removes the last audio track. An empty
-  `UNMANIC_SUBTITLE_LANGS` is sent as `*` (keep all), because the subtitle plugin reads
-  an empty list as "keep none". Accepted differences from the Tdarr rule: an untagged or
-  `und` audio track is removed when a tagged original-language track exists (Tdarr kept
-  it), and a file whose lookup failed is not retried on its own — only a later scan or
-  a new write to that file tests it again.
-- **The repo owns the whole setup, over the API.** `unmanic-bootstrap.sh` (run by
-  `nas post-install`) uploads the plugins, sets the worker count, and writes both
-  libraries with both plugins enabled, configured and ordered (audio, then subtitles).
-  Library 1 is created by Unmanic at first boot and cannot be deleted, so it becomes
-  Movies; Series is created. A re-run rewrites all of it, so `nas recreate unmanic`
-  comes back fully configured and UI edits to these settings do not survive a re-run.
+  and neither plugin ever removes the last audio track. A file whose lookup failed is not
+  retried on its own; only a later scan or a new write to that file tests it again.
 - **The arr keys live in a copy.** The audio plugin reads the Radarr/Sonarr URL and key
-  from its per-library settings in Unmanic's config dir — no environment option exists.
-  The bootstrap re-syncs them from `sonarr.env`/`radarr.env` on every run, and the keys
-  never rotate on their own (section 8, Secrets). The URLs are the nas-net names
-  (`http://radarr:7878`), not the host-side `RADARR_URL` the bootstraps use.
+  from its per-library settings in Unmanic's config dir — no environment option exists. The
+  keys never rotate on their own (Secrets, below), so the copy stays valid. The URLs are
+  the nas-net names (`http://radarr:7878`).
 - **inotify on, scanner off.** The library scanner walks the whole tree on a schedule
   and wakes the HDD. The file monitor is event-driven: it fires when Radarr/Sonarr write
   a file, when the disk is awake anyway. It walks the directory tree once at container
@@ -462,59 +453,26 @@ Each app's API key is injected as `<APP>__AUTH__APIKEY`, read at every start **i
 `config.xml`, so the key is never persisted by the app; Seerr's rides the same flow as
 `API_KEY`. `nas install` generates each of the five keys once, into that unit's own `.env`
 (`sonarr.env`/`radarr.env`/`lidarr.env`/`prowlarr.env`/`seerr.env`) — one file, one key,
-one unit — and never regenerates it.
+one unit — and never regenerates it. Because the key exists before the app first starts,
+the Homepage widget labels carry it from the first bring-up.
 
 Each unit's own `.env` therefore holds the only copy of its key. Losing one does not error —
-that app quietly mints and persists a *new* key, and Prowlarr's sync, Configarr and that
-unit's Homepage widget break at once, with no error anywhere; the per-unit split confines
-the damage to whichever unit actually lost its file. `nas destroy` preserves every `.env`
-for this reason.
+that app quietly mints and persists a *new* key, and every place the old one was pasted
+(Prowlarr's apps, Seerr, Unmanic's plugin) plus that unit's Homepage widget break at once,
+with no error anywhere. The per-unit split confines the damage to whichever unit actually
+lost its file. `nas destroy` preserves every `.env` for this reason.
 
-`shared.env` holds only what more than one unit genuinely reuses: `TZ`/`PUID`/`PGID`/
-`UMASK`/`DOCKER_GID`, `LAN_HOST`, `DOWNLOADS_DIR`, and the single `ADMIN_USER`/
-`ADMIN_PASSWORD` identity that Jellyfin's admin login, qBittorrent's WebUI and Seerr's
-`/auth/jellyfin` all consume. No API key lives there: a key is exactly one unit's concern,
-so it stays in that unit's own file.
+`shared.env` holds what more than one unit reuses: `TZ`/`PUID`/`PGID`/`UMASK`/`DOCKER_GID`,
+`LAN_HOST`, `DOWNLOADS_DIR`. It also holds `ADMIN_USER`/`ADMIN_PASSWORD`, which only
+qBittorrent's Homepage widget reads. Nothing sets that login in any service: it is typed into
+qBittorrent by hand, and using it for Jellyfin's admin too is a convention no file enforces.
+No API key lives in `shared.env`: a key is exactly one unit's concern, so it stays in that
+unit's own file.
 
 The keys also appear in `homepage.widget.key` labels, and labels are readable by anything that
 can read the Docker socket or run `docker inspect`. Accepted on the same basis as the socket
 mount itself: LAN-only, single-user, no forwarded ports. It needs revisiting alongside that
 decision if the box ever becomes externally reachable.
-
-### qBittorrent first-boot config
-
-qBittorrent generates a **new random WebUI password on every start unless one is already
-stored** — the sole trigger is an empty stored password, and the temporary one is per-session
-and never persisted. Without pre-seeding, every container restart would invalidate the
-credentials the arr apps hold. So `nas install` writes `qBittorrent.conf` before first start
-with a PBKDF2 hash (SHA-512, 100000 iterations, 16-byte salt, 64-byte key,
-`base64(salt):base64(key)` wrapped in `@ByteArray(...)`).
-
-qBittorrent **rewrites that file on clean shutdown**, so it is a first-boot seed, not ongoing
-config management — it is installed only when absent, and edits made on the NAS survive.
-
-The seed cap lives there too: `Session\ShareLimitAction=Stop`, so qBittorrent **stops** a
-torrent at `GlobalMaxRatio` / `GlobalMaxSeedingMinutes` and deletes nothing. Two config
-details are easy to get wrong:
-
-- The key is `Session\ShareLimitAction`. `MaxRatioAction` is obsolete.
-- The value is the enum's **string name**, not its integer — enums serialise via
-  `Utils::String::fromEnum`, so a numeric value fails to parse and silently falls back to
-  the default. The enum is non-sequential (`Stop = 0`, `Remove = 1`,
-  `EnableSuperSeeding = 2`, `RemoveWithContent = 3`), so guessing the number is doubly
-  unsafe.
-
-Deletion is the arr apps' half of the hand-off: **`removeCompletedDownloads` is `true`** on
-every arr download client, and the pinned versions only remove a torrent — *with* its
-files — once qBittorrent reports it stopped at the cap, never mid-seed. (A caveat that this
-setting removed torrents right after import, defeating the cap, was v2-era behavior — do
-not act on it.) `ShareLimitAction=RemoveWithContent` with arr-side removal off would free
-the same space but can delete a download the arr app has not imported yet — and the arr
-apps' download-client POST/PUT refuses (HTTP 400) any qBittorrent configured to remove at
-the limit, so the pairing is enforced by their own validation.
-Accepted costs: torrents added outside the arr apps (or in a foreign category) stop at the
-cap but are never deleted, and a failed import holds its data on the SSD until resolved in
-the Activity queue rather than being silently reaped.
 
 ---
 
@@ -530,37 +488,44 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 
 ## 10. Running
 
-One CLI, `./nas`, is the whole operator interface: `configure` (the gum wizard, TTY only),
-`install` (root; brings units up, then chains `post-install` — the API bootstraps in the
-fixed order jellyfin → arr → seerr → unmanic), `destroy` (root; shows the full plan first, then an
-explicit confirmation — typed `delete` when data is involved), `recreate` (destroy +
-install, one confirmation), plus the read-only `status`, `logs`, `doctor` and the
-deliberately manual `indexers`. Full behavior spec: `docs/cli-spec.md`; the plain-compose
-invocations underneath, and the invariants an operator or agent must preserve, are in
-`CLAUDE.md` §Running. Underneath it is ordinary compose — one project per **service**,
-`--env-file shared.env` first, then the unit's own.
+One CLI, `./nas`, is the operator interface: `install`, `destroy` and `recreate` (root),
+plus the read-only `status`, `logs` and `doctor`. Full behavior spec: `docs/cli-spec.md`;
+the plain-compose invocations underneath, and the invariants an operator or agent must
+preserve, are in `CLAUDE.md` §Running. Underneath it is ordinary compose — one project per
+**service**, `--env-file shared.env` first, then the unit's own.
+
+A fresh box comes up in four steps:
+
+1. `sudo ./nas install` creates `nas-net`, every `.env` from its example, and the per-unit
+   API keys, then stops: `ADMIN_PASSWORD` is still empty, and the qBittorrent compose file
+   refuses to render without it.
+2. Fill in the `.env` files it created — `ADMIN_PASSWORD` in `shared.env` at least, and
+   any host fact that differs from the defaults.
+3. `sudo ./nas install` again: host directories and ownership, Homepage templates,
+   containers.
+4. Configure each service in its own UI, following `docs/manual-setup.md`. Jellyfin's
+   Homepage widget needs an API key that only exists once Jellyfin is set up: put it and
+   the scan task id in `jellyfin.env`, then `sudo ./nas install jellyfin`. That recreates
+   the container, because labels are baked in at create and `docker restart` never
+   refreshes them.
 
 The reasoning the CLI encodes:
 
-- **Idempotent install.** Existing `.env` files are never overwritten, secrets are
-  generated exactly once, config templates install only when absent, bootstraps skip what
-  is already configured. Running it twice is safe.
+- **Idempotent install.** Existing `.env` files are never overwritten, keys are generated
+  exactly once, config templates install only when absent. Running it twice is safe.
 - **Per-unit lifecycle.** `sudo ./nas recreate radarr` tears down and recreates exactly one
-  unit while it stays wired into the rest of the stack; the CLI — never a compose file —
-  carries the cross-unit couplings (section 8, `docs/cli-spec.md`). `core` and `arr` are
-  selection aliases only, not compose or network concepts.
+  unit while it stays wired into the rest of the stack: same network, same API key. With
+  its data deleted, the service itself comes back blank and is set up again by hand — but
+  its key survives, so every copy of that key elsewhere keeps working. `core` and `arr`
+  are selection aliases only, not compose or network concepts.
 - **Destruction is scoped and previewed.** Nothing outside `/volume2/docker` can be
   deleted, and the plan is shown before anything runs. `.env` files survive teardown —
   they hold the only copy of each key. The download tree is exempted by name rather than
   by the root check: it *is* inside `/volume2/docker` and would pass validation, but a
   still-seeding torrent is not a config artifact and is not reproducible from this repo.
-- **Bootstrap ordering.** Seerr comes last because it binds requests to the quality
-  profiles Configarr creates. A Seerr failure is **deferred, not fatal**: the stack stays
-  up, the summary names it, the exit code is non-zero — an unconfigured Seerr cannot pass
-  as a successful bring-up.
-- **Bring-up order has no network-ownership constraint.** `nas-net` exists before any unit
-  starts and is removed only once nothing is still attached, whichever units come down
-  last.
+- **Bring-up order has no constraint.** `nas-net` exists before any unit starts, nothing
+  hard-depends on another unit being up, and `nas-net` is removed only once nothing is
+  still attached.
 
 ---
 
@@ -575,21 +540,17 @@ The reasoning the CLI encodes:
 | HTTP only | `.local` cannot receive a public certificate (RFC 6762) | No transport encryption on the LAN |
 | `apollo.local` only | No per-name systemd units to maintain across OS updates | Service URLs carry port numbers |
 | Exact image pins | Reproducible; the daemon API is old enough that floating tags break | Manual update step |
+| Services configured by hand in their UIs | Each service's own UI is the source of truth; no automation to break when an upstream API or setup flow changes | A wiped config dir means redoing that service's setup by hand (`docs/manual-setup.md`) |
 | Downloads on the SSD | Seeding never holds the media HDD awake | No hardlinks — every import is a full copy, transient 2× space |
 | Seed cap stops; arr apps delete | Nothing is removed before import; the arr apps drain the SSD tree | Torrents outside the arr apps stop at the cap but are never deleted |
 | arr root folders on the existing `Media/` dirs | No migration of a live library; Jellyfin unchanged | Keeps the capitalised, non-TRaSH layout |
 | `PUID`/`PGID` as env for arr | What LinuxServer.io images support; no socket access to gate | Inconsistent with Homepage/Jellyfin's `user:` |
-| Each arr unit's API key generated into its own `.env` | Breaks the key-distribution cycle; bring-up is one pass; a lost/rotated key only breaks that one unit | That `.env` is the only copy and is load-bearing forever |
-| Per-service compose files + `shared.env`, `core`/`arr` as aliases only | `sudo ./nas recreate radarr` tears down and recreates exactly one unit; the CLI is the only place that knows how units relate | A dozen compose files instead of 3; `configarr`'s extra `--env-file` flags and `ofelia`'s "ensure configarr exists" are coupling that lives in the CLI, not a compose file |
+| Each arr unit's API key generated into its own `.env` | Known before the app first starts, so widget labels carry it from the first bring-up; a lost key only breaks that one unit | That `.env` is the only copy and is load-bearing forever |
+| Per-service compose files + `shared.env`, `core`/`arr` as aliases only | `sudo ./nas recreate radarr` tears down and recreates exactly one unit; the CLI is the only place that knows how units relate | Ten compose files instead of one; the qBittorrent sparing rule and its adoption of an existing container live in the CLI, not a compose file |
 | Keys in `homepage.widget.*` labels | Widgets need them; tile config stays with the service | Readable via `docker inspect` |
 | No VPN for torrent traffic | Nothing to configure or keep alive | Torrent traffic uses the LAN's own egress |
-| Configarr over Recyclarr | Reads `!env` natively, so the bootstrap needs no fragile generate-then-rewrite credential patching; actively tracks upstream template churn | Younger project; no built-in scheduler, so one is bolted on |
-| Ofelia as that scheduler | Keeps the daily cadence inside compose — no host cron for `nas destroy` to clean up | A **second** container with root-equivalent socket access |
 | `nas destroy` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |
-| Lidarr outside configarr/TRaSH scope, and outside Seerr | The frozen Recyclarr template tree has no Lidarr profiles, configarr's Lidarr support is experimental, and Seerr does not do music requests | Default quality profiles until that changes; music is requested in Lidarr itself |
-| Seerr as one of the `arr`-alias units | Consumes the Sonarr/Radarr keys from their own `.env` files; same lifecycle and bootstrap ordering | `nas destroy arr` (and the no-args default) deletes its request history; it is not strictly an "arr" app |
-| Seerr's admin is the Jellyfin admin account, via `shared.env`'s `ADMIN_USER`/`ADMIN_PASSWORD` | The first `/auth/jellyfin` call creates it — no second credential to mint or store; the identity is shared with qBittorrent's WebUI too, so it is prompted/stored once, not kept in sync by hand across files | One password gates several logins, and rotating it has **no working path today**: `qBittorrent.conf` installs only when absent, jellyfin-bootstrap never changes an existing password, arr-bootstrap skips an existing download client. Rotation is reserved for a future `nas configure --rotate-identity` (`docs/wizard-spec.md` §Future) |
-| Seerr's bootstrap is its own script, failing non-zero | Inside `arr-bootstrap.sh` every step was `warn; return 0`, so a Seerr that configured *nothing* was indistinguishable from one skipped on purpose and the bring-up reported success over it | A fourth automation script, and the install exit code depends on a non-essential service |
+| Seerr as one of the `arr`-alias units | Same lifecycle as the Sonarr/Radarr it forwards to | `nas destroy arr` (and the no-args default) deletes its request history; it is not strictly an "arr" app |
 | Seerr → Jellyfin by LAN IP | Host-networked Jellyfin is off `nas-net`; container names and mDNS don't resolve | Breaks if the DHCP reservation ever moves |
 
 ### The standing assumption

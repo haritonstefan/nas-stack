@@ -1,7 +1,7 @@
 services:
   # Libraries, plugins and the worker count live in Unmanic's own database
-  # under /config, written by unmanic-bootstrap.sh over the API — nothing in
-  # this file seeds them. See spec section 8, Unmanic.
+  # under /config, set up by hand in its UI — nothing in this file seeds them.
+  # A fresh Unmanic has zero workers and processes nothing until you add one.
   unmanic:
     image: josh5/unmanic:0.4.1
     container_name: unmanic

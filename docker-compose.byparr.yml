@@ -1,6 +1,6 @@
 services:
   # No published port and no homepage labels: internal-only, so a tile would be
-  # a dead end. Registered as Prowlarr's indexer proxy by arr-indexers.sh;
+  # a dead end. Add it in Prowlarr as a FlareSolverr indexer proxy (http://byparr:8191);
   # Prowlarr calls it only when a Cloudflare challenge is detected on a tagged
   # indexer. Speaks the FlareSolverr /v1 API (GET-only — request.post is
   # accepted but treated as a GET; fine here, the CF-protected trackers all

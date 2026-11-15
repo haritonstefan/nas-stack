@@ -20,9 +20,7 @@ reports healthy/unhealthy without a compose-level entry.)
 Homepage, Jellyfin and Seerr (drafted below), plus the arr units — sonarr,
 radarr, prowlarr and qbittorrent — which have no drafts yet; the arr apps
 expose `/ping` unauthenticated, so the same wget/curl-in-image caveat applies.
-Not applicable or open: configarr is run-to-completion, so a healthcheck does
-not apply; byparr's image ships its own `HEALTHCHECK` (see top); ofelia is a
-judgment call — open.
+Not needed: byparr's image ships its own `HEALTHCHECK` (see top).
 
 ### Homepage
 

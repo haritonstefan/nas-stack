@@ -1,6 +1,6 @@
 services:
   # Media request front-end for Jellyfin users. Not a LinuxServer.io image — it
-  # runs as node (1000), so identity is compose `user:` like configarr, not
+  # runs as node (1000), so identity is compose `user:` like homepage, not
   # PUID/PGID env. Reaches Jellyfin at LAN_HOST, not a container name (see the spec).
   seerr:
     image: ghcr.io/seerr-team/seerr:v3.4.1
@@ -14,8 +14,8 @@ services:
       PORT: "5055"
       LOG_LEVEL: info
       # Overwrites the stored apiKey in settings.json at every start — same
-      # never-persisted idiom as the arr keys, so the widget below and
-      # seerr-bootstrap.sh work from first boot.
+      # never-persisted idiom as the arr keys. A key rotated in the Seerr UI
+      # does not survive a restart; seerr.env is the source of truth.
       API_KEY: ${SEERR_API_KEY:?SEERR_API_KEY is unset — run nas install to generate it}
     ports:
       - "${SEERR_PORT:-5055}:5055"

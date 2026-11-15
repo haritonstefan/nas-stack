@@ -4,14 +4,12 @@
 # recreate one unit while it stays wired into the rest of the stack.
 
 cmd_recreate() {
-  local args=() arg no_post_install=0
+  local args=() arg
   for arg in "$@"; do
     case "$arg" in
       --yes|-y)           DESTROY_YES=1 ;;
       --dry-run)          DRY_RUN=1 ;;
       --wipe-qbittorrent) DESTROY_WIPE_QBT=1 ;;
-      --no-post-install)  no_post_install=1 ;;
-      --verbose|-v)       VERBOSE=1 ;;
       -h|--help)          recreate_usage; return 0 ;;
       -*)                 die "unknown flag '${arg}' for nas recreate" ;;
       *)                  args+=("$arg") ;;
@@ -34,8 +32,6 @@ cmd_recreate() {
 
   install_preflight
   install_run
-  . lib/cmd_post_install.sh
-  [ "$no_post_install" -eq 1 ] || post_install_run
 
   if [ -n "$FAILED_UNITS" ]; then
     ui_banner "Recreate incomplete — failed:${FAILED_UNITS}" \
@@ -53,10 +49,11 @@ cmd_recreate() {
 
 recreate_usage() {
   cat <<EOF
-nas recreate <unit...> [--yes] [--dry-run] [--wipe-qbittorrent] [--no-post-install]
+nas recreate <unit...> [--yes] [--dry-run] [--wipe-qbittorrent]
 
 Destroys and reinstalls the named units, one confirmation up front covering
 both. The unit stays wired into the rest of the stack: same nas-net, same
-shared identity, same API keys (each unit's own .env survives).
+API keys (each unit's own .env survives). With its data deleted, the service
+comes back blank — set it up again in its UI.
 EOF
 }

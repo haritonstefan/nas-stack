@@ -32,7 +32,7 @@ cmd_doctor() {
     say "doctor: ${unit}"
     if [ -n "$UNIT_ENV_FILE" ] && [ ! -f "$UNIT_ENV_FILE" ]; then
       if [ "$UNIT_STANDALONE" -eq 1 ]; then
-        info "not configured yet (${UNIT_ENV_FILE} missing) — run: ./nas configure ${unit}, then: cd pi-hole && sudo docker compose up -d"
+        info "not configured yet (${UNIT_ENV_FILE} missing) — copy pi-hole/.env.example to pi-hole/.env, fill it in, then: cd pi-hole && sudo docker compose up -d"
       else
         info "not installed yet (${UNIT_ENV_FILE} missing) — run: sudo ./nas install ${unit}"
       fi

@@ -2,13 +2,10 @@
 # nas install — bring units up (docs/cli-spec.md §nas install).
 
 cmd_install() {
-  local no_post_install=0 args=()
-  local arg
+  local args=() arg
   for arg in "$@"; do
     case "$arg" in
       --dry-run)         DRY_RUN=1 ;;
-      --verbose|-v)      VERBOSE=1 ;;
-      --no-post-install) no_post_install=1 ;;
       -h|--help)         install_usage; return 0 ;;
       -*)                die "unknown flag '${arg}' for nas install (see: nas install --help)" ;;
       *)                 args+=("$arg") ;;
@@ -22,24 +19,18 @@ cmd_install() {
 
   install_preflight
   install_run
-  . lib/cmd_post_install.sh
-  if [ "$no_post_install" -eq 1 ]; then
-    say "Skipping post-install (--no-post-install)"
-  else
-    post_install_run
-  fi
   install_summary
 }
 
 install_usage() {
   cat <<EOF
-nas install [--dry-run] [--verbose] [--no-post-install] [unit...|all]
+nas install [--dry-run] [unit...|all]
 
 Brings the selected units (default: all) from a fresh clone to running:
 nas-net, .env files (created from the examples, never overwritten), host
-directories with the right ownership, generated per-unit secrets, config
-templates (installed only when absent), compose up per unit, then chains
-\`nas post-install\` for the selected units. Idempotent.
+directories with the right ownership, generated per-unit API keys, Homepage
+config templates (installed only when absent), compose up per unit.
+Idempotent. Configuring the services themselves is done by hand in each UI.
 
 Units: ${UNITS_ALL} (aliases: core, arr, all)
 EOF
@@ -47,13 +38,9 @@ EOF
 
 install_preflight() {
   say "Checking prerequisites"
-  local cmd missing=""
-  for cmd in docker curl jq openssl; do
-    command -v "$cmd" >/dev/null 2>&1 || missing="${missing} ${cmd}"
-  done
-  [ -z "$missing" ] || die "missing required command(s):${missing}"
+  command -v docker >/dev/null 2>&1 || die "docker is required"
   docker compose version >/dev/null 2>&1 || die "'docker compose' (v2) is required"
-  info "docker, docker compose, curl, jq, openssl present"
+  info "docker and docker compose present"
   if ! docker info >/dev/null 2>&1; then
     if [ "$DRY_RUN" -eq 1 ]; then
       warn "cannot talk to the Docker daemon — continuing anyway since this is a dry run"
@@ -118,66 +105,27 @@ install_run() {
     say "Starting ${unit}"
     compose_up_unit || mark_failed "$unit" $?
   done
-
-  # ofelia's job-run only starts an existing container by name — it never
-  # creates one — so whenever ofelia is in scope the configarr container must
-  # exist, created but not started, even when configarr was not selected.
-  if want ofelia && ! want configarr; then
-    say "Ensuring the configarr container exists (scheduler target)"
-    unit_load configarr
-    compose_up_unit || warn "could not create the configarr container — ofelia's schedule will fail on inspect"
-  fi
 }
 
-# Missing required values stop the run and point at the wizard; with a TTY the
-# wizard is offered right there, then the check re-runs once. A missing value
-# that is another unit's generated key (configarr's cross-unit case) is not the
-# wizard's to fill — its owner's install generates it.
-generated_key_owner() { # generated_key_owner <var> — unit that generates it
-  local u
-  for u in $UNITS_ALL; do
-    ( unit_load "$u"
-      case " $UNIT_GENERATED " in *" $1 "*) exit 0 ;; esac
-      exit 1 ) && { printf '%s' "$u"; return 0; }
-  done
-  return 1
-}
-
+# Required values that are still empty stop the run before anything starts:
+# compose would refuse them anyway (${VAR:?}), one unit at a time.
 install_check_required() {
-  local attempt
-  for attempt in 1 2; do
-    local unit var val owner missing="" foreign=""
-    for unit in $(selected_units); do
-      unit_load "$unit"
-      unit_env_load
-      for var in $UNIT_REQUIRED; do
-        eval "val=\${${var}:-}"
-        [ -n "$val" ] && continue
-        if owner=$(generated_key_owner "$var") && ! want "$owner"; then
-          foreign="${foreign} ${unit} needs ${var} (owned by ${owner})"
-        else
-          missing="${missing} ${unit}:${var}"
-        fi
-      done
+  local unit var val missing=""
+  for unit in $(selected_units); do
+    unit_load "$unit"
+    unit_env_load
+    for var in $UNIT_REQUIRED; do
+      eval "val=\${${var}:-}"
+      [ -n "$val" ] || missing="${missing} ${unit}:${var}"
     done
-    if [ -n "$foreign" ]; then
-      warn "missing generated keys:${foreign}"
-      [ "$DRY_RUN" -eq 1 ] || die "bring the owning unit(s) up first — e.g. sudo ./nas install sonarr radarr $(selected_units | sed 's/^ *//')"
-    fi
-    [ -z "$missing" ] && return 0
-    warn "missing required values:${missing}"
-    if [ "$DRY_RUN" -eq 1 ]; then
-      warn "continuing — this is a dry run"
-      return 0
-    fi
-    if [ "$attempt" -eq 1 ] && is_tty && ui_confirm "Run 'nas configure' for the selected units now?" Y; then
-      # shellcheck disable=SC2086
-      "$NAS_SELF" configure $(selected_units) || true
-      continue
-    fi
-    die "fill them in with: ./nas configure $(selected_units | sed 's/^ *//')"
   done
-  die "required values still missing after configure — see above"
+  [ -z "$missing" ] && return 0
+  warn "missing required values:${missing}"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    warn "continuing — this is a dry run"
+    return 0
+  fi
+  die "fill them in (shared.env or the unit's own .env), then re-run: sudo ./nas install $(selected_units | sed 's/^ *//')"
 }
 
 make_dir() {
@@ -248,11 +196,10 @@ install_summary() {
   if want homepage;    then info "Homepage:    http://apollo.local/"; fi
   if want jellyfin;    then info "Jellyfin:    http://apollo.local:8096"; fi
   if want sonarr;      then info "Sonarr:      http://apollo.local:$(unit_load sonarr; unit_env_load; unit_port)"; fi
-  if want prowlarr;    then info "Next: run ./nas indexers to add the trackers to Prowlarr"; fi
   if [ -n "$FAILED_UNITS" ]; then
     ui_banner "Some units FAILED:${FAILED_UNITS}" \
       "The stack that did come up stays up. Fix the cause above, then" \
-      "re-run: sudo ./nas install <unit>  (or ./nas post-install <unit>)"
+      "re-run: sudo ./nas install <unit>"
     exit 1
   fi
   exit 0

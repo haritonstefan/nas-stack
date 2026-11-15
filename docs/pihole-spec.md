@@ -66,24 +66,24 @@ has two standing consequences:
 - **P7 — The LAN must survive PiHole being down.** Unchanged and still the sharpest
   requirement: `restart: unless-stopped`, and the router keeps a public resolver as
   secondary DNS. This is the one unit whose failure is felt outside the NAS.
-- **P8 — Zero bootstrap.** Held: password, upstreams and address are all env/compose
-  values. Nothing needed the API.
+- **P8 — Nothing to set up over an API.** Password, upstreams and address are all
+  env/compose values.
 
 ## CLI coverage
 
 The CLI knows pihole exists but never manages its lifecycle (`UNIT_STANDALONE` in
 its unit file — `docs/cli-spec.md` §Code layout):
 
-- `nas configure pihole` — fills `pi-hole/.env` from its example like any other
-  unit's. Its questions never include the shared identity: `PIHOLE_PASSWORD` is its
-  own credential (P4).
+- `pi-hole/.env` — copied from `pi-hole/.env.example` and filled in by hand; no
+  verb creates or edits it. `PIHOLE_PASSWORD` is its own credential, never the
+  shared `ADMIN_PASSWORD` (P4).
 - `nas status` — container state over the docker socket, `pi-hole/.env` presence.
 - `nas logs pihole` — plain `docker logs pihole`.
 - `nas doctor` — DNS answering probed via `docker exec` from inside the container
   (**verify** the image ships a resolver client); the NAS cannot reach
   `192.168.0.53` (macvlan), so the LAN-side check is printed as a command for a
   client, never attempted locally.
-- `nas install|destroy|recreate|post-install pihole` — refused, pointing at the
+- `nas install|destroy|recreate pihole` — refused, pointing at the
   standalone bring-up: `cd pi-hole && sudo docker compose up -d` / `down`. Lifecycle
   integration would make the macvlan network script-managed like `nas-net`; this
   spec gets revisited if that ever happens.

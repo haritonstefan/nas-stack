@@ -23,22 +23,20 @@ usage() {
   cat <<EOF
 nas — manage the apollo NAS stack
 
-  ./nas configure    [unit...]        wizard for the .env files (TTY only)
-  sudo ./nas install [unit...|all]    bring units up; chains post-install
-  sudo ./nas post-install [unit...]   API configuration of running services
+  sudo ./nas install [unit...|all]    bring units up
   sudo ./nas destroy [unit...|all]    tear down (plan + confirm; --yes)
   sudo ./nas recreate <unit...>       destroy + install, one confirmation
   ./nas status       [unit...]        per-unit state table
   ./nas logs <unit> [--follow]        docker logs, unit-aware
   ./nas doctor       [unit...]        read-only checks of known failure modes
-  ./nas indexers                      Prowlarr tracker wiring
 
 Units:   ${UNITS_ALL}
-         ${UNITS_STANDALONE} (standalone: configure + read-only verbs only)
+         ${UNITS_STANDALONE} (standalone: read-only verbs only)
 Aliases: core -> homepage · arr -> ${ARR_UNITS} · all
 
 'nas <verb> --help' has the details. Typical first run:
-  ./nas configure && sudo ./nas install && ./nas indexers
+  sudo ./nas install, fill in the .env files it creates, sudo ./nas install again.
+Service setup (libraries, download clients, indexers) is done by hand in each UI.
 EOF
 }
 
@@ -47,16 +45,13 @@ VERB="$1"
 shift
 
 case "$VERB" in
-  configure)     . lib/cmd_configure.sh;    cmd_configure "$@" ;;
   install)       . lib/cmd_install.sh;      cmd_install "$@" ;;
-  post-install)  . lib/cmd_post_install.sh; cmd_post_install "$@" ;;
   destroy)       . lib/cmd_destroy.sh;      cmd_destroy "$@" ;;
   recreate)      . lib/cmd_destroy.sh; . lib/cmd_install.sh; . lib/cmd_recreate.sh
                  cmd_recreate "$@" ;;
   status)        . lib/cmd_status.sh;       cmd_status "$@" ;;
   logs)          . lib/cmd_logs.sh;         cmd_logs "$@" ;;
   doctor)        . lib/cmd_doctor.sh;       cmd_doctor "$@" ;;
-  indexers)      . lib/cmd_indexers.sh;     cmd_indexers "$@" ;;
   update)        die "nas update is reserved but not designed yet — edit the image pin and run: sudo ./nas recreate <unit>" ;;
   help|-h|--help) usage ;;
   *)             echo "Unknown verb: ${VERB}" >&2; usage >&2; exit 1 ;;

@@ -35,10 +35,10 @@ services:
       # LAN IP (shared.env's LAN_HOST): Jellyfin is host-networked and off
       # nas-net, and neither container names nor .local resolve from inside a
       # container.
-      # JELLYFIN_API_KEY and JELLYFIN_SCAN_TASK_ID are minted by
-      # jellyfin-bootstrap.sh (not the CLI), so they are legitimately empty on
-      # the first bring-up — nas post-install recreates this container once the bootstrap
-      # has written them, because labels are baked in at container create.
+      # JELLYFIN_API_KEY and JELLYFIN_SCAN_TASK_ID are filled in by hand once
+      # Jellyfin is set up, so they are legitimately empty on first bring-up.
+      # Labels are baked in at container create, so `docker restart` never
+      # picks them up; `sudo ./nas install jellyfin` recreates on the change.
       - homepage.siteMonitor=http://${LAN_HOST:-192.168.0.231}:8096
       - homepage.widgets[0].type=jellyfin
       - homepage.widgets[0].url=http://${LAN_HOST:-192.168.0.231}:8096

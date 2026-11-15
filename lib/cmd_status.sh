@@ -21,12 +21,8 @@ cmd_status() {
   for unit in $(selected_units); do
     rows="${rows}\n$(status_row "$unit")"
   done
-  if ui_available; then
-    printf '%b\n' "$rows" | "$GUM_BIN" table --print --separator "$(printf '\t')"
-  else
-    printf '%b\n' "$rows" | column -t -s "$(printf '\t')" 2>/dev/null \
-      || printf '%b\n' "$rows"
-  fi
+  printf '%b\n' "$rows" | column -t -s "$(printf '\t')" 2>/dev/null \
+    || printf '%b\n' "$rows"
 
   if [ "${#args[@]}" -eq 1 ] && { is_unit "${args[0]}" || is_standalone "${args[0]}"; }; then
     status_detail "${args[0]}"

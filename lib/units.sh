@@ -4,13 +4,12 @@
 # Everything a unit declares is plain strings and space-delimited word lists
 # (docs/cli-spec.md §Code layout). Core loads one unit file at a time and
 # resets every declaration between loads, so unit files share one vocabulary
-# with no per-unit prefixes. Cross-unit knowledge (ordering, aliases, the
-# ofelia→configarr coupling, the jellyfin widget-key recreate) lives in the
-# verb implementations, never in a unit file (R7).
+# with no per-unit prefixes. Cross-unit knowledge (aliases, the qBittorrent
+# sparing rule) lives in the verb implementations, never in a unit file.
 
-UNITS_ALL="homepage jellyfin sonarr radarr lidarr prowlarr qbittorrent seerr byparr configarr ofelia unmanic"
+UNITS_ALL="homepage jellyfin sonarr radarr lidarr prowlarr qbittorrent seerr byparr unmanic"
 UNITS_STANDALONE="pihole"
-ARR_UNITS="sonarr radarr lidarr prowlarr qbittorrent seerr byparr configarr ofelia"
+ARR_UNITS="sonarr radarr lidarr prowlarr qbittorrent seerr byparr"
 
 UNITS=""
 EXPLICIT_QBITTORRENT=0
@@ -80,20 +79,16 @@ unit_load() {
   UNIT_COMPOSE_FILE="docker-compose.${unit}.yml"
   UNIT_ENV_FILE="${unit}.env"
   UNIT_ENV_FILES="shared.env ${unit}.env"
-  UNIT_UP_ARGS=""
-  UNIT_DOWN_ARGS=""
   UNIT_DIRS=""
   UNIT_CHECK_DIRS=""
   UNIT_TEMPLATES=""
   UNIT_GENERATED=""
-  UNIT_MINTED=""
   UNIT_REQUIRED=""
   UNIT_PORT=""
   UNIT_PORT_VAR=""
   UNIT_LOG_PATHS=""
-  UNIT_POST_INSTALL=""
   UNIT_STANDALONE=0
-  unset -f unit_configure unit_templates unit_adopt unit_post_install unit_destroy_plan unit_doctor 2>/dev/null || true
+  unset -f unit_templates unit_adopt unit_destroy_plan unit_doctor 2>/dev/null || true
   # shellcheck disable=SC1090
   . "units/${unit}.sh"
 }
@@ -127,7 +122,7 @@ resolve_dir_spec() {
 }
 
 # The unit's config dir is the first UNIT_DIRS entry; the default destroy
-# target is its parent (one path covers configarr's config/ + repos/).
+# target is its parent (one path covers e.g. jellyfin's config/ + cache/).
 unit_config_dir() {
   local first="${UNIT_DIRS%% *}"
   [ -n "$first" ] || return 1
