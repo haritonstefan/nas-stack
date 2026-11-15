@@ -1,0 +1,64 @@
+services:
+  runner:
+    image: gitlab/gitlab-runner:alpine-v19.5.3
+    container_name: runner
+    restart: unless-stopped
+    # SIGTERM, compose's default, aborts running jobs. SIGQUIT stops taking new
+    # ones and exits when the current job ends; the grace period caps the wait.
+    stop_signal: SIGQUIT
+    stop_grace_period: 10m
+    volumes:
+      # config.toml holds the runner's glrt- token. nas destroy deletes it, so
+      # the runner has to be registered again afterwards.
+      - ${RUNNER_CONFIG_DIR:-/volume2/docker/runner/config}:/etc/gitlab-runner
+      # Starts job containers on the host daemon. Socket access is root on the
+      # NAS: it stays here and is never handed on to jobs. See spec section 8.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - nas-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - homepage.group=Core
+      - homepage.name=GitLab Runner
+      - homepage.icon=gitlab.png
+      - homepage.href=https://gitlab.com
+      - homepage.description=CI jobs for gitlab.com
+
+  # The runner never expires its local cache: every new cache key leaves the
+  # old files behind. Deletes what no job has read in 30 days.
+  runner-cache-cleaner:
+    image: alpine:3.24.4
+    container_name: runner-cache-cleaner
+    restart: unless-stopped
+    # sh as PID 1 ignores SIGTERM; init lets compose stop it without the 10s kill.
+    init: true
+    network_mode: none
+    read_only: true
+    # By last read, not last write: fill-cache skips rewriting an unchanged
+    # cache, so a cache in daily use can be months old by mtime. On a noatime
+    # mount atime is the write time, and an in-use cache gets rebuilt monthly.
+    command:
+      - sh
+      - -c
+      - |
+        while :; do
+          find /cache -type f -atime +30 -print -delete
+          find /cache -mindepth 1 -type d -empty -delete
+          sleep 86400
+        done
+    volumes:
+      - ${RUNNER_CACHE_DIR:-/volume2/docker/runner/cache}:/cache
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  nas-net:
+    name: nas-net
+    external: true

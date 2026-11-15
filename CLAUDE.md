@@ -22,6 +22,8 @@ and `shared.env` (vars reused by more than one unit). Units:
   apps (Sonarr, Radarr, Lidarr, Prowlarr, Seerr, Byparr) are no longer in this
   repo.
 - `unmanic`: post-import audio/subtitle cleanup on the movie/series library.
+- `runner`: a GitLab Runner for gitlab.com, Docker executor, no port. Unit
+  names must stay hyphen-free: the CLI derives `<UNIT>_CONFIG_DIR` from them.
 - `pihole`: standalone macvlan compose in `pi-hole/` with its own `.env` and LAN
   IP `192.168.0.53`. The CLI doesn't know it: run it with
   `cd pi-hole && sudo docker compose up -d`. The NAS itself can't reach that IP
@@ -173,6 +175,9 @@ dashboard tile. Plain HTTP (spec §2–3).
 - **Jellyfin widget labels are baked in at container create.** After filling in
   `JELLYFIN_API_KEY`/`JELLYFIN_SCAN_TASK_ID`, `sudo ./nas install jellyfin`
   recreates the container. `docker restart` won't.
+- **The runner's socket never reaches a job.** No `privileged`, no socket, and
+  no host path but the cache dir in `config.toml`'s `volumes`. Either gives job
+  code root on the NAS (spec §8).
 - **Never mount the download tree into Unmanic.** It rewrites files in place.
   The library is only safe to rewrite because imports are cross-filesystem
   copies, not the seeding file (spec §6).

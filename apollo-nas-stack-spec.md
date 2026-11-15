@@ -394,6 +394,52 @@ Worker, libraries and plugins are set up by hand
   gets 022 — harmless, since every service runs as the same PUID. Its entrypoint chowns
   `/config` recursively at every start. Unmanic has no API auth; the box is LAN-only.
 
+### GitLab Runner
+
+A project runner for gitlab.com, Docker executor. It has no UI and publishes no port: it
+polls gitlab.com for jobs. Registration and job limits are set by hand
+(`docs/manual-setup.md`).
+
+- **The socket stops at the runner.** The Docker executor starts each job as a sibling
+  container on the host daemon, so the runner needs `/var/run/docker.sock`, and socket
+  access is root on the NAS. Jobs get neither the socket nor `privileged`: either one
+  lets job code mount `/volume1`. The jobs run Node.js builds and Cloudflare deploys,
+  which need no Docker. A job that ever has to build an image uses a daemonless builder
+  (rootless BuildKit, Buildah), not socket binding or Docker-in-Docker.
+- **It runs as root, the image's default.** `DOCKER_GID` doesn't apply: that identity
+  setup is Homepage's (section 7).
+- **Jobs opt in by tag.** The runner is tagged `apollo` and doesn't take untagged jobs,
+  and the pipeline sets `tags: [apollo]`. The alternative, turning off the project's
+  instance runners, would strand GitLab Duo flows: on gitlab.com they only run on
+  instance or top-level group runners.
+- **Jobs stay off `nas-net`.** They run on Docker's default bridge, so job code can't
+  reach the other containers by name.
+- **Three jobs at a time, each capped at 4 CPUs / 1.5 GB.** The box has 6 cores and 8 GB,
+  shared with Jellyfin; three jobs take at most 4.5 GB. Job data lands in the Docker data
+  root, `/volume2/@docker`, so CI never spins up the HDD.
+- **One cache dir for all slots.** By default the runner keeps a cache volume per
+  concurrent slot (`runner-…-project-<id>-concurrent-<n>`), and `cache_dir` splits by slot
+  too. So a cache one job pushes would miss in the other slots. A host bind,
+  `RUNNER_CACHE_DIR` at `/cache`, is shared. It also drops GitLab's split between
+  protected and unprotected caches, so a merge request job can write what a deploy on
+  `main` restores. That is fine while only the owner pushes to the project.
+- **The cache expires by last read.** The runner never deletes local cache: each new key
+  (here, every `package-lock.json` change) leaves the old files behind. A second
+  container in the unit, `runner-cache-cleaner`, deletes cache files not read in 30 days,
+  once a day. It has no network and no socket. It goes by atime, not mtime, because a
+  `pull-push` job skips rewriting an unchanged cache. On a `noatime` mount atime falls
+  back to the write time, and the worst case is a cache in use rebuilt once a month.
+- **SIGQUIT, not SIGTERM.** SIGTERM aborts running jobs. With `stop_signal: SIGQUIT`, a
+  recreate waits for the current job, up to the 10-minute grace period.
+- **The token dies with the unit.** `register` writes it to `config.toml` inside the
+  config dir, which `nas destroy runner` deletes. Afterwards the runner is registered
+  again and the old one removed in GitLab.
+- **Leftovers sit outside the compose project.** Job containers, per-project cache
+  volumes and pulled images (job and helper) are created through the socket, so neither
+  compose nor `nas destroy` removes them. Containers and volumes carry the
+  `com.gitlab.gitlab-runner.managed=true` label, which scopes their cleanup; images
+  don't, so theirs is a plain unused-image prune.
+
 ### What lives in shared.env
 
 `shared.env` holds what more than one unit reuses: `TZ`/`PUID`/`PGID`/`UMASK`/`DOCKER_GID`,
@@ -485,3 +531,9 @@ The reasoning the CLI encodes:
 This design assumes the LAN is trusted and single-user — both the plain-HTTP decision and
 the Docker socket mount rest on it. If the NAS ever becomes reachable from outside the LAN,
 **both need revisiting before that happens**, not after.
+
+The GitLab Runner is the one place where code from outside runs on the box: the CI jobs,
+including every npm dependency's install scripts. A job can reach every published port on
+the LAN IP, and Unmanic has no auth. That is accepted because the runner is a project
+runner for code the user owns. A runner shared with other people's projects, or one that
+runs fork merge requests, breaks the assumption.
