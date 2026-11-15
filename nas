@@ -7,9 +7,6 @@ cd "$(dirname "$0")"
 
 SAFE_ROOT=/volume2/docker
 REPO=$(pwd -P)
-ARR="sonarr radarr lidarr prowlarr qbittorrent seerr byparr"
-# Units whose API key the repo mints. Jellyfin's key is pasted in by hand.
-KEYED="sonarr radarr lidarr prowlarr seerr"
 ALL=$(for f in docker-compose.*.yml; do f=${f#docker-compose.}; printf '%s ' "${f%.yml}"; done)
 ALL=${ALL% }
 
@@ -25,9 +22,8 @@ upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]'; }
 usage() {
   cat <<EOF
 sudo ./nas install [--dry-run] [unit...]
-    Network, .env files from the examples (never overwritten), API keys
-    (generated once), host dirs + ownership, Homepage templates when absent,
-    compose up. Idempotent.
+    Network, .env files from the examples (never overwritten), host dirs +
+    ownership, Homepage templates when absent, compose up. Idempotent.
 
 sudo ./nas destroy [--dry-run] [--yes] [--containers] [unit...]
     Shows the plan, asks you to type 'delete', saves logs, removes the
@@ -37,10 +33,9 @@ sudo ./nas destroy [--dry-run] [--yes] [--containers] [unit...]
 
 ./nas compose <unit> <args...>
     docker compose with the unit's project and env files, e.g.
-    ./nas compose sonarr logs -f   |   sudo ./nas compose sonarr ps
+    ./nas compose jellyfin logs -f   |   sudo ./nas compose jellyfin ps
 
 No unit means all. Units: ${ALL}
-Alias: arr = ${ARR}
 EOF
 }
 
@@ -51,13 +46,12 @@ select_units() { # select_units <verb> [token...]
   for t in "$@"; do
     case $t in
       all) expanded=$ALL ;;
-      arr) expanded=$ARR ;;
-      *) in_list "$t" "$ALL" || die "unknown unit '$t' (units: ${ALL}; aliases: arr, all)"
+      *) in_list "$t" "$ALL" || die "unknown unit '$t' (units: ${ALL}, or all)"
          expanded=$t; named="$named $t" ;;
     esac
     for u in $expanded; do in_list "$u" "$UNITS" || UNITS="$UNITS $u"; done
   done
-  # Through an alias or the default, destroy leaves qBittorrent seeding.
+  # Through `all` or the default, destroy leaves qBittorrent seeding.
   if [ "$verb" = destroy ] && in_list qbittorrent "$UNITS" && ! in_list qbittorrent "$named"; then
     UNITS=$(for u in $UNITS; do [ "$u" = qbittorrent ] || printf ' %s' "$u"; done)
     SPARED=1
@@ -109,30 +103,8 @@ make_dir() {
   run chown "${PUID:-1000}:${PGID:-10}" "$1"
 }
 
-# The arr apps read their key from the environment at every start and never
-# persist it, so it's minted once and never regenerated.
-gen_key() { # gen_key <unit>
-  local f="$1.env" var key
-  var="$(upper "$1")_API_KEY"
-  # shellcheck disable=SC1090
-  if [ -f "$f" ] && (. "./$f" && [ -n "${!var:-}" ]); then return 0; fi
-  if [ "$DRY_RUN" -eq 1 ]; then printf '  [dry-run] generate %s in %s\n' "$var" "$f"; return 0; fi
-  key=$(od -vAn -N16 -tx1 /dev/urandom | tr -d ' \n')
-  if grep -q "^$var=" "$f"; then
-    sed -i "s/^$var=.*/$var=$key/" "$f"
-  else
-    printf '%s=%s\n' "$var" "$key" >> "$f"
-  fi
-  # load_env already exported it empty, and compose lets the shell environment
-  # win over --env-file.
-  export "$var=$key"
-  chmod 600 "$f"
-  if [ -n "${SUDO_UID:-}" ]; then chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$f"; fi
-  say "generated $var in $f"
-}
-
 cmd_install() {
-  local u U f v owner dl_done=0 created=0
+  local u U f v owner created=0
   docker network inspect nas-net >/dev/null 2>&1 || run docker network create nas-net
 
   for u in shared $UNITS; do
@@ -146,9 +118,6 @@ cmd_install() {
     created=1
   done
 
-  for u in $UNITS; do
-    if in_list "$u" "$KEYED"; then load_env "$u"; gen_key "$u"; fi
-  done
   # Nothing gets created or started on defaults nobody has looked at yet.
   if [ "$created" -eq 1 ]; then
     say "new .env files above: fill in the empty values (ADMIN_PASSWORD at least), then re-run"
@@ -160,9 +129,8 @@ cmd_install() {
     U=$(upper "$u")
 
     for v in "${U}_CONFIG_DIR" "${U}_CACHE_DIR"; do make_dir "${!v:-}"; done
-    if in_list "$u" "sonarr radarr lidarr qbittorrent" && [ "$dl_done" -eq 0 ]; then
+    if [ "$u" = qbittorrent ]; then
       for v in "" /complete /incomplete; do make_dir "${DOWNLOADS_DIR:-}$v"; done
-      dl_done=1
     fi
 
     if [ "$u" = homepage ]; then

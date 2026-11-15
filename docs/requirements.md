@@ -15,10 +15,10 @@ own UI (`docs/manual-setup.md`).
 
 1. **Single entrypoint.** All lifecycle operations go through `./nas`.
 2. **Per-app lifecycle.** Install and destroy operate on one unit at a time by
-   default. Destroying `radarr` must not disturb `sonarr`, `nas-net`, or any other unit's
-   API keys — a hard requirement to preserve.
+   default. Destroying `unmanic` must not disturb `jellyfin`, `nas-net`, or any other
+   unit's `.env` — a hard requirement to preserve.
 3. **Wiring in code, service setup by hand.** The repo owns everything outside a
-   service: network, mounts, ports, identities, API keys, dashboard tiles. Inside a
+   service: network, mounts, ports, identities, dashboard tiles. Inside a
    service, its own UI is the source of truth.
 4. **PiHole, standalone.** The CLI doesn't know it; its lifecycle is its own
    two-command compose (spec: `docs/pihole-spec.md` §CLI coverage).
@@ -37,7 +37,7 @@ own UI (`docs/manual-setup.md`).
 
 ## Scope: the units
 
-Ten managed units, each a self-contained `docker-compose.<unit>.yml` + `<unit>.env`
+Four managed units, each a self-contained `docker-compose.<unit>.yml` + `<unit>.env`
 pair, plus standalone pihole. The CLI drives them by naming convention (`CLAUDE.md`
 §Files):
 
@@ -45,16 +45,9 @@ pair, plus standalone pihole. The CLI drives them by naming convention (`CLAUDE.
 |---|---|
 | homepage | dashboard, entrypoint, `:80` |
 | jellyfin | media server, host networking |
-| sonarr / radarr / prowlarr | arr apps |
-| lidarr | music arr |
 | qbittorrent | download client |
-| seerr | request front-end |
-| byparr | Cloudflare solver for Prowlarr |
 | unmanic | post-import audio/subtitle cleanup |
 | pihole | DNS ad-blocking, standalone (`docs/pihole-spec.md`) |
-
-`arr` is a selection alias only (sonarr, radarr, lidarr, prowlarr, qbittorrent, seerr,
-byparr).
 
 ## Hard requirements
 
@@ -64,23 +57,22 @@ rather than renumbering the rest.
 - **R1 — Destruction is scoped.** Nothing outside `/volume2/docker` can ever be deleted.
   Delete targets sourced from `.env` files are validated against that root: rejected if
   they escape it, contain `..`, or are the root itself.
-- **R2 — `.env` files survive teardown.** They hold the only copy of each unit's API key.
-  Losing one silently breaks every place that key was pasted (Prowlarr, Seerr, Unmanic)
-  and the Homepage widget for that unit.
+- **R2 — `.env` files survive teardown.** They hold hand-filled secrets
+  (`ADMIN_PASSWORD`, Jellyfin's API key) that the repo can't recreate.
 - **R3 — The download tree survives teardown.** Config is reproducible from this repo; a
   still-seeding torrent is not.
 - **R4 — Destructive operations preview first.** `nas destroy` shows the full plan
   (containers, on-disk paths) and requires confirmation; `--yes` skips it for scripted
   use.
 - **R5 — Idempotent install.** Running install twice is safe: existing `.env` files are
-  never overwritten, generated keys are generated once, config templates are installed
+  never overwritten, config templates are installed
   only when absent (on-NAS edits survive).
 - **R6 — Non-interactive operation.** Every verb must be runnable without a TTY. A
   prompt is never the only path: without a TTY, a verb either proceeds on a flag
   (`--yes`) or refuses with a clear exit code.
 - **R7 — Cross-unit knowledge lives in the CLI only.** Compose files stay ignorant of each
-  other: no `depends_on`, no shared volumes, `nas-net` script-managed. The aliases and
-  the qBittorrent sparing rule live in the CLI, never in a compose file.
+  other: no `depends_on`, no shared volumes, `nas-net` script-managed. The
+  qBittorrent sparing rule lives in the CLI, never in a compose file.
 - **R9 — Live-NAS discipline.** GET-only probing, dry-run before mutating, logs collected
   before any wipe, exact image pins. (These are operator rules as much as CLI rules; the
   CLI encodes them where it can — e.g. `destroy` always saves logs first.)

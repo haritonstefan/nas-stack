@@ -5,8 +5,8 @@
 Self-hosted service stacks for a UGreen NAS (UGOS, `apollo.local`), as Docker
 Compose files in git, driven by one small CLI. A fresh clone brings back the
 containers and their wiring with `sudo ./nas install`: same network, same
-directories, same API keys. **It does not configure the services.** Libraries,
-download clients, indexers and profiles are set up by hand in each UI, using
+directories. **It does not configure the services.** Libraries, plugins and
+settings are set up by hand in each UI, using
 `docs/manual-setup.md`. That is deliberate: the API-driven setup scripts were
 removed because they were too brittle to maintain. Don't reintroduce
 service-side automation without being asked.
@@ -18,8 +18,9 @@ and `shared.env` (vars reused by more than one unit). Units:
 
 - `homepage`: the dashboard on `:80`.
 - `jellyfin`: the media server, host-networked.
-- `sonarr` / `radarr` / `lidarr` / `prowlarr` / `qbittorrent` / `seerr` / `byparr`:
-  the arr stack (the `arr` alias).
+- `qbittorrent`: the torrent client, seeding from the download tree. The arr
+  apps (Sonarr, Radarr, Lidarr, Prowlarr, Seerr, Byparr) are no longer in this
+  repo.
 - `unmanic`: post-import audio/subtitle cleanup on the movie/series library.
 - `pihole`: standalone macvlan compose in `pi-hole/` with its own `.env` and LAN
   IP `192.168.0.53`. The CLI doesn't know it: run it with
@@ -32,9 +33,9 @@ and `shared.env` (vars reused by more than one unit). Units:
 - `docker-compose.<unit>.yml` + `<unit>.env.example`: one self-contained pair
   per unit. A var used by exactly one unit lives only in that unit's file. The
   CLI finds units by globbing the compose files and works by naming convention:
-  `<UNIT>_CONFIG_DIR` (its parent is the destroy target), optional
-  `<UNIT>_CACHE_DIR`, and `<UNIT>_API_KEY` for the units in `KEYED`. A new unit
-  that follows the convention needs no CLI change.
+  `<UNIT>_CONFIG_DIR` (its parent is the destroy target) and an optional
+  `<UNIT>_CACHE_DIR`. A new unit that follows the convention needs no CLI
+  change.
 - `shared.env.example`: `TZ`, `PUID`, `PGID`, `UMASK`, `DOCKER_GID`,
   `LAN_HOST`, `DOWNLOADS_DIR`, `ADMIN_USER`/`ADMIN_PASSWORD` (the qBittorrent
   login, read by its Homepage widget).
@@ -83,8 +84,8 @@ can't test your own work**:
   `TZ=Europe/Bucharest`.
 - LAN IP `192.168.0.231` (DHCP reservation), `apollo.local` via mDNS.
 - Ports: `80` Homepage, `8096`/`7359`/`1900` Jellyfin (host networking),
-  `8989`/`7878`/`8686`/`9696`/`8080` Sonarr/Radarr/Lidarr/Prowlarr/qBittorrent,
-  `6881` tcp+udp torrent, `5055` Seerr, `8888` Unmanic, `53` PiHole, `9999` UGOS.
+  `8080` qBittorrent, `6881` tcp+udp torrent, `8888` Unmanic, `53` PiHole,
+  `9999` UGOS.
 - Docker daemon API `1.54`.
 - Bind-mount sources aren't auto-created with the right ownership. `nas install`
   mkdir+chowns them, which is one reason it needs root.
@@ -92,10 +93,9 @@ can't test your own work**:
 ## Running
 
 `sudo ./nas install [unit...]` per selected unit (default: all): `nas-net`,
-`.env` files from the examples (never overwritten), generated API keys (once,
-never regenerated), host dirs + ownership, Homepage templates when absent,
-compose up. A run that created a new `.env` stops after the keys, so the
-values get reviewed before anything starts. Idempotent. A missing required value (e.g. `ADMIN_PASSWORD`) fails
+`.env` files from the examples (never overwritten), host dirs + ownership,
+Homepage templates when absent, compose up. A run that created a new `.env`
+stops right there, so the values get reviewed before anything starts. Idempotent. A missing required value (e.g. `ADMIN_PASSWORD`) fails
 that unit through compose's `${VAR:?}`. The other units still start, and the
 run exits non-zero. A same-named container outside `nas-<unit>` is skipped
 with a warning, never touched.
@@ -118,9 +118,10 @@ changed. A clean slate is `destroy <unit>` then `install <unit>`.
 - **Plan, then confirm.** Deleting data takes typing `delete`. `--yes` skips it,
   `--dry-run` prints the plan, `--containers` deletes no data. Logs are always
   saved first (Jellyfin's and Unmanic's live inside the dir being deleted).
-- **`.env` files and the download tree survive.** The `.env` files are the only
-  copy of the API keys. A still-seeding torrent can't be rebuilt from git.
-- **qBittorrent sparing.** In scope only via `arr` or the no-args default,
+- **`.env` files and the download tree survive.** The `.env` files hold
+  hand-filled secrets (`ADMIN_PASSWORD`, Jellyfin's key) and, on the NAS, the
+  old arr API keys. A still-seeding torrent can't be rebuilt from git.
+- **qBittorrent sparing.** In scope only via `all` or the no-args default,
   qbittorrent keeps running and seeding. It only goes if named explicitly.
   `nas-net` is never removed.
 
@@ -133,7 +134,7 @@ dashboard tile. Plain HTTP (spec §2–3).
 - Bridge on `nas-net` by default. `network_mode: host` only for something that
   needs LAN broadcast/multicast (Jellyfin, the one exception).
 - **Jellyfin is not on `nas-net`.** Containers reach each other by name
-  (`http://sonarr:8989`), but anything talking to Jellyfin uses `LAN_HOST`.
+  (`http://qbittorrent:8080`), but anything talking to Jellyfin uses `LAN_HOST`.
 - Homepage's Docker integration needs the socket mount *and* `docker.yaml`.
   Labels are read over the socket API, so host-networked containers still show up.
 - **Socket access is a DAC problem.** When discovery fails, no container is
@@ -163,12 +164,8 @@ dashboard tile. Plain HTTP (spec §2–3).
 
 ## Service traps that shape the repo
 
-- **Each arr unit's API key in its own `.env` is load-bearing forever.** It's
-  injected as `SONARR__AUTH__APIKEY` etc. (Seerr: `API_KEY`), which the app reads
-  at every start *instead of* persisting it. Lose the file and the app silently
-  mints a new key, breaking Prowlarr sync and the Homepage widget with no error.
-  **A 401 usually means a container older than its `.env`**, not a wrong key.
-  `sudo ./nas install <unit>` recreates it.
+- **A widget 401 usually means a container older than its `.env`**, not a wrong
+  key or password. `sudo ./nas install <unit>` recreates it.
 - **Jellyfin: never add `ports:`.** Host networking is required because client
   discovery (`7359/udp`) and DLNA (`1900/udp`) are broadcast/multicast, which
   bridge publishing doesn't forward (spec §5). UGOS's own DLNA responder is off
@@ -179,8 +176,9 @@ dashboard tile. Plain HTTP (spec §2–3).
 - **Never mount the download tree into Unmanic.** It rewrites files in place.
   The library is only safe to rewrite because imports are cross-filesystem
   copies, not the seeding file (spec §6).
-- **Unmanic's media mounts must keep Radarr/Sonarr's container paths**
-  (`/media/movies`, `/media/series`). Its audio plugin matches files by path
-  prefix. Change one side and every file is skipped silently.
-- `DOWNLOADS_DIR` is mounted at `/downloads` in qbittorrent and the arr apps.
-  qBittorrent reports absolute paths, so any drift silently breaks imports.
+- **Unmanic's media mounts must match Radarr/Sonarr's container paths**
+  (`/media/movies`, `/media/series`), wherever those run now. Its audio plugin
+  matches files by path prefix and looks up the language in Radarr/Sonarr.
+  Change one side, or lose them, and every file is skipped silently.
+- `DOWNLOADS_DIR` is mounted at `/downloads` in qbittorrent. qBittorrent reports
+  absolute paths, so anything importing from it needs the same path.

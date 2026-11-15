@@ -25,8 +25,8 @@ services:
       # Read-write: the result replaces the original in place. The download
       # tree is deliberately not mounted, so a seeding torrent can never be
       # touched — imports are copies (spec section 6). The container paths
-      # must stay identical to radarr's and sonarr's: the audio plugin matches
-      # a file to its movie/series by path prefix, with no path mapping set.
+      # must match what Radarr/Sonarr see: the audio plugin matches a file to
+      # its movie/series by path prefix, with no path mapping set.
       - ${UNMANIC_MOVIES_DIR:-/volume1/Media/Movies}:/media/movies
       - ${UNMANIC_SERIES_DIR:-/volume1/Media/Series}:/media/series
     networks:

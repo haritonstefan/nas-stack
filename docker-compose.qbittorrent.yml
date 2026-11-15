@@ -16,8 +16,8 @@ services:
       - "${QBITTORRENT_TORRENT_PORT:-6881}:${QBITTORRENT_TORRENT_PORT:-6881}/udp"
     volumes:
       - ${QBITTORRENT_CONFIG_DIR:-/volume2/docker/qbittorrent/config}:/config
-      # Identical container path in sonarr, radarr and qbittorrent — see
-      # sonarr's compose file. Shared via DOWNLOADS_DIR in shared.env.
+      # qBittorrent reports absolute paths, so anything importing from it
+      # must see this tree at /downloads too.
       - ${DOWNLOADS_DIR:-/volume2/docker/downloads}:/downloads
     networks:
       - nas-net
