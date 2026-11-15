@@ -112,7 +112,7 @@ host-networked, so anything that talks to it uses `LAN_HOST`
 
   The image prune removes every image no container uses, a destroyed unit's
   too; the next `nas install` pulls it again. The CI cache cleans itself:
-  `runner-cache-cleaner` deletes what no job has read in 30 days, and
+  `runner-cache-cleaner` deletes what no job has written in 30 days, and
   `sudo docker logs runner-cache-cleaner` lists what it removed.
 - After `nas destroy runner`, delete the old runner in GitLab and register a
   new one.

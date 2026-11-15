@@ -29,7 +29,7 @@ services:
       - homepage.description=CI jobs for gitlab.com
 
   # The runner never expires its local cache: every new cache key leaves the
-  # old files behind. Deletes what no job has read in 30 days.
+  # old files behind. Deletes what no job has written in 30 days.
   runner-cache-cleaner:
     image: alpine:3.24.4
     container_name: runner-cache-cleaner
@@ -38,15 +38,15 @@ services:
     init: true
     network_mode: none
     read_only: true
-    # By last read, not last write: fill-cache skips rewriting an unchanged
-    # cache, so a cache in daily use can be months old by mtime. On a noatime
-    # mount atime is the write time, and an in-use cache gets rebuilt monthly.
+    # By last write: /volume2 is noatime, so reads leave no trace. A cache in
+    # daily use that never changes still expires, and the next fill-cache run
+    # rebuilds it.
     command:
       - sh
       - -c
       - |
         while :; do
-          find /cache -type f -atime +30 -print -delete
+          find /cache -type f -mtime +30 -print -delete
           find /cache -mindepth 1 -type d -empty -delete
           sleep 86400
         done

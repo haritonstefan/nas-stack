@@ -423,12 +423,13 @@ polls gitlab.com for jobs. Registration and job limits are set by hand
   `RUNNER_CACHE_DIR` at `/cache`, is shared. It also drops GitLab's split between
   protected and unprotected caches, so a merge request job can write what a deploy on
   `main` restores. That is fine while only the owner pushes to the project.
-- **The cache expires by last read.** The runner never deletes local cache: each new key
+- **The cache expires by last write.** The runner never deletes local cache: each new key
   (here, every `package-lock.json` change) leaves the old files behind. A second
-  container in the unit, `runner-cache-cleaner`, deletes cache files not read in 30 days,
-  once a day. It has no network and no socket. It goes by atime, not mtime, because a
-  `pull-push` job skips rewriting an unchanged cache. On a `noatime` mount atime falls
-  back to the write time, and the worst case is a cache in use rebuilt once a month.
+  container in the unit, `runner-cache-cleaner`, deletes cache files not written in 30
+  days, once a day. It has no network and no socket. Last read would be the better
+  measure, but `/volume2` is mounted `noatime`. A `pull-push` job skips rewriting an
+  unchanged cache, so a cache in use still expires after 30 days and is rebuilt on the
+  next pipeline: one slower run a month.
 - **SIGQUIT, not SIGTERM.** SIGTERM aborts running jobs. With `stop_signal: SIGQUIT`, a
   recreate waits for the current job, up to the 10-minute grace period.
 - **The token dies with the unit.** `register` writes it to `config.toml` inside the
