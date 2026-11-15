@@ -22,23 +22,24 @@ and `shared.env` (vars reused by more than one unit). Units:
   the arr stack (the `arr` alias).
 - `unmanic`: post-import audio/subtitle cleanup on the movie/series library.
 - `pihole`: standalone macvlan compose in `pi-hole/` with its own `.env` and LAN
-  IP `192.168.0.53`. The read-only verbs cover it, the lifecycle verbs refuse
-  it. The NAS itself can't reach that IP (kernel macvlan rule). See
-  `docs/pihole-spec.md`.
+  IP `192.168.0.53`. The CLI doesn't know it: run it with
+  `cd pi-hole && sudo docker compose up -d`. The NAS itself can't reach that IP
+  (kernel macvlan rule). See `docs/pihole-spec.md`.
 
 ### Files
 
-- `nas` + `lib/`: the CLI (`install`, `destroy`, `recreate`, `status`, `logs`,
-  `doctor`, all with `--help`). Spec: `docs/cli-spec.md`.
-- `units/<unit>.sh`: what the CLI knows about each unit (dirs, generated keys,
-  required vars, hooks). Values tabulated in `docs/units.md`.
+- `nas`: the CLI, one bash file (`install`, `destroy`, `compose`; `--help`).
 - `docker-compose.<unit>.yml` + `<unit>.env.example`: one self-contained pair
-  per unit. A var used by exactly one unit lives only in that unit's file.
+  per unit. A var used by exactly one unit lives only in that unit's file. The
+  CLI finds units by globbing the compose files and works by naming convention:
+  `<UNIT>_CONFIG_DIR` (its parent is the destroy target), optional
+  `<UNIT>_CACHE_DIR`, and `<UNIT>_API_KEY` for the units in `KEYED`. A new unit
+  that follows the convention needs no CLI change.
 - `shared.env.example`: `TZ`, `PUID`, `PGID`, `UMASK`, `DOCKER_GID`,
   `LAN_HOST`, `DOWNLOADS_DIR`, `ADMIN_USER`/`ADMIN_PASSWORD` (the qBittorrent
   login, read by its Homepage widget).
-- `homepage-config/`: templates `nas install` copies only when absent. A new
-  one must also be listed in `units/homepage.sh`'s `UNIT_TEMPLATES`.
+- `homepage-config/`: templates `nas install` copies only when absent (every
+  `*.yaml` in the folder).
 - `docs/manual-setup.md`: the non-obvious settings to apply by hand per service.
 - `apollo-nas-stack-spec.md`: the reasoning behind each architectural
   constraint. Read it before proposing an architectural change.
@@ -50,7 +51,8 @@ on it, not a lab.
 
 - **Probe with `GET` only.** A write request is not a discovery tool.
 - **Dry-run before mutating**: `./nas install --dry-run`, `./nas destroy --dry-run`.
-- **Collect logs before anything destructive** (`nas destroy --save-logs`).
+- **Collect logs before anything destructive.** `nas destroy` saves them to
+  `/volume2/docker/_saved-logs/` on its own. Anything you wipe by hand, save first.
 - **GET-modify-PUT** for config objects. Never send a partial body to an
   endpoint that deserializes over a whole object.
 - **Pin exact patch versions.** Never `:latest`, never a floating tag.
@@ -91,33 +93,36 @@ can't test your own work**:
 
 `sudo ./nas install [unit...]` per selected unit (default: all): `nas-net`,
 `.env` files from the examples (never overwritten), generated API keys (once,
-never regenerated), a required-values check, host dirs + ownership, Homepage
-templates when absent, compose up. Missing required values (e.g.
-`ADMIN_PASSWORD` for qbittorrent) stop the run with a pointer to the file.
-Idempotent. `install`, `destroy`, `recreate` need root. `status`, `logs`,
-`doctor` don't.
+never regenerated), host dirs + ownership, Homepage templates when absent,
+compose up. A run that created a new `.env` stops after the keys, so the
+values get reviewed before anything starts. Idempotent. A missing required value (e.g. `ADMIN_PASSWORD`) fails
+that unit through compose's `${VAR:?}`. The other units still start, and the
+run exits non-zero. A same-named container outside `nas-<unit>` is skipped
+with a warning, never touched.
 
 Underneath it's plain compose. Compose doesn't read `.env` on its own and all
 units share one directory, so `--env-file shared.env --env-file <unit>.env` and
 `-p nas-<unit>` are required on every call. Without them the units collapse
-into one project and report each other as orphans:
+into one project and report each other as orphans. `./nas compose <unit> ...`
+adds them for you: `logs -f`, `ps`, `restart`, `up -d --force-recreate`.
 
-```
-docker compose -p nas-sonarr --env-file shared.env --env-file sonarr.env -f docker-compose.sonarr.yml up -d
-```
+There is no `recreate` verb. A container older than its `.env` gets fixed with
+`sudo ./nas install <unit>`, because compose recreates when the resolved config
+changed. A clean slate is `destroy <unit>` then `install <unit>`.
 
 `nas destroy` invariants to preserve:
 
 - **Nothing outside `/volume2/docker` can be deleted.** Delete targets come from
-  a sourced `.env`, so every path is validated against that root (`lib/paths.sh`).
+  a sourced `.env`, so every path is checked against that root (`deletable`).
+  The repo dir and the download tree are refused too.
 - **Plan, then confirm.** Deleting data takes typing `delete`. `--yes` skips it,
-  `--dry-run` prints the plan, `--containers` deletes no data, `--save-logs`
-  copies logs out first (Jellyfin's live inside the dir being deleted).
+  `--dry-run` prints the plan, `--containers` deletes no data. Logs are always
+  saved first (Jellyfin's and Unmanic's live inside the dir being deleted).
 - **`.env` files and the download tree survive.** The `.env` files are the only
   copy of the API keys. A still-seeding torrent can't be rebuilt from git.
 - **qBittorrent sparing.** In scope only via `arr` or the no-args default,
-  qbittorrent keeps running and seeding, and `nas-net` survives with it. It only
-  goes if named explicitly or with `--wipe-qbittorrent`.
+  qbittorrent keeps running and seeding. It only goes if named explicitly.
+  `nas-net` is never removed.
 
 ## Networking & routing
 
@@ -136,8 +141,8 @@ dashboard tile. Plain HTTP (spec §2–3).
   `ENOENT` means the path is wrong. `EACCES` means found and refused: check
   `docker inspect` for `CapDrop`/`SecurityOpt`, PID 1's real `Groups`/`CapEff`
   in `/proc/1/status`, and `dmesg | grep denied`. The identity setup (primary
-  GID via `user: "${PUID}:${DOCKER_GID}"`) is spec §7. `nas doctor homepage`
-  checks it.
+  GID via `user: "${PUID}:${DOCKER_GID}"`) is spec §7. Quick check:
+  `DOCKER_GID` in `shared.env` must equal `stat -c %g /var/run/docker.sock`.
 - `homepage.href` is what the browser opens (`http://apollo.local:8096`).
   `homepage.widget.url` is fetched by the Homepage container, so it uses
   container names. The two aren't interchangeable.
@@ -163,7 +168,7 @@ dashboard tile. Plain HTTP (spec §2–3).
   at every start *instead of* persisting it. Lose the file and the app silently
   mints a new key, breaking Prowlarr sync and the Homepage widget with no error.
   **A 401 usually means a container older than its `.env`**, not a wrong key.
-  Recreate it (`nas doctor` checks for exactly this).
+  `sudo ./nas install <unit>` recreates it.
 - **Jellyfin: never add `ports:`.** Host networking is required because client
   discovery (`7359/udp`) and DLNA (`1900/udp`) are broadcast/multicast, which
   bridge publishing doesn't forward (spec §5). UGOS's own DLNA responder is off

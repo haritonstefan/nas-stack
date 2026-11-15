@@ -85,7 +85,7 @@ container. **That is a different architecture, not an incremental change.**
 ## 4. Network topology
 
 One user-defined bridge network, `nas-net`, created and removed directly by the CLI
-(`nas install` / `nas destroy`, plain `docker network create/rm`) — no compose file owns it.
+(`nas install`, plain `docker network create`; nothing removes it) — no compose file owns it.
 Every unit's compose file, including Homepage's, joins it as `external: true`.
 
 - Services that talk to each other by container name share `nas-net`.
@@ -141,7 +141,7 @@ and breaks all of them at once. Changing it needs a container restart.
 ### GPU passthrough
 
 `RENDER_GID=105`, passed via `group_add`, with `/dev/dri/renderD128` in `devices:`. Confirm
-rather than copy if the host changes (`nas doctor jellyfin` compares the two):
+rather than copy if the host changes; it must match `RENDER_GID` in `jellyfin.env`:
 
 ```bash
 stat -c '%g %G' /dev/dri/renderD128
@@ -488,17 +488,16 @@ hostname to `HOMEPAGE_ALLOWED_HOSTS` or Homepage rejects the request.
 
 ## 10. Running
 
-One CLI, `./nas`, is the operator interface: `install`, `destroy` and `recreate` (root),
-plus the read-only `status`, `logs` and `doctor`. Full behavior spec: `docs/cli-spec.md`;
-the plain-compose invocations underneath, and the invariants an operator or agent must
-preserve, are in `CLAUDE.md` §Running. Underneath it is ordinary compose — one project per
+One small CLI, `./nas`, is the operator interface: `install` and `destroy` (root), plus
+`compose`, which runs plain `docker compose` with the unit's project and env files. The
+invariants an operator or agent must preserve are in `CLAUDE.md` §Running. Underneath it is ordinary compose — one project per
 **service**, `--env-file shared.env` first, then the unit's own.
 
 A fresh box comes up in four steps:
 
 1. `sudo ./nas install` creates `nas-net`, every `.env` from its example, and the per-unit
-   API keys, then stops: `ADMIN_PASSWORD` is still empty, and the qBittorrent compose file
-   refuses to render without it.
+   API keys, then stops: nothing is created on disk or started on defaults nobody has
+   reviewed.
 2. Fill in the `.env` files it created — `ADMIN_PASSWORD` in `shared.env` at least, and
    any host fact that differs from the defaults.
 3. `sudo ./nas install` again: host directories and ownership, Homepage templates,
@@ -513,19 +512,20 @@ The reasoning the CLI encodes:
 
 - **Idempotent install.** Existing `.env` files are never overwritten, keys are generated
   exactly once, config templates install only when absent. Running it twice is safe.
-- **Per-unit lifecycle.** `sudo ./nas recreate radarr` tears down and recreates exactly one
-  unit while it stays wired into the rest of the stack: same network, same API key. With
+- **Per-unit lifecycle.** `sudo ./nas destroy radarr && sudo ./nas install radarr` tears
+  down and recreates exactly one unit while it stays wired into the rest of the stack:
+  same network, same API key. With
   its data deleted, the service itself comes back blank and is set up again by hand — but
-  its key survives, so every copy of that key elsewhere keeps working. `core` and `arr`
-  are selection aliases only, not compose or network concepts.
+  its key survives, so every copy of that key elsewhere keeps working. `arr` is a
+  selection alias only, not a compose or network concept.
 - **Destruction is scoped and previewed.** Nothing outside `/volume2/docker` can be
   deleted, and the plan is shown before anything runs. `.env` files survive teardown —
   they hold the only copy of each key. The download tree is exempted by name rather than
   by the root check: it *is* inside `/volume2/docker` and would pass validation, but a
   still-seeding torrent is not a config artifact and is not reproducible from this repo.
-- **Bring-up order has no constraint.** `nas-net` exists before any unit starts, nothing
-  hard-depends on another unit being up, and `nas-net` is removed only once nothing is
-  still attached.
+- **Bring-up order has no constraint.** `nas-net` exists before any unit starts and
+  nothing hard-depends on another unit being up. `nas-net` is never removed: an empty
+  network costs nothing, and removing it would cut off anything still attached.
 
 ---
 
@@ -546,7 +546,7 @@ The reasoning the CLI encodes:
 | arr root folders on the existing `Media/` dirs | No migration of a live library; Jellyfin unchanged | Keeps the capitalised, non-TRaSH layout |
 | `PUID`/`PGID` as env for arr | What LinuxServer.io images support; no socket access to gate | Inconsistent with Homepage/Jellyfin's `user:` |
 | Each arr unit's API key generated into its own `.env` | Known before the app first starts, so widget labels carry it from the first bring-up; a lost key only breaks that one unit | That `.env` is the only copy and is load-bearing forever |
-| Per-service compose files + `shared.env`, `core`/`arr` as aliases only | `sudo ./nas recreate radarr` tears down and recreates exactly one unit; the CLI is the only place that knows how units relate | Ten compose files instead of one; the qBittorrent sparing rule and its adoption of an existing container live in the CLI, not a compose file |
+| Per-service compose files + `shared.env`, `arr` as an alias only | Destroying and reinstalling `radarr` touches exactly one unit; the CLI is the only place that knows how units relate | Ten compose files instead of one; the qBittorrent sparing rule lives in the CLI, not a compose file |
 | Keys in `homepage.widget.*` labels | Widgets need them; tile config stays with the service | Readable via `docker inspect` |
 | No VPN for torrent traffic | Nothing to configure or keep alive | Torrent traffic uses the LAN's own egress |
 | `nas destroy` keeps the download tree | Config is reproducible from the repo; a part-done torrent is not | A "clean slate" needs one manual `rm` |

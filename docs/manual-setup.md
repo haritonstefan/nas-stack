@@ -14,7 +14,7 @@ anything that talks to it uses `LAN_HOST` (`http://192.168.0.231:8096`).
 
 ## qBittorrent — `:8080`
 
-- First boot prints a temporary WebUI password in `./nas logs qbittorrent`. Set
+- First boot prints a temporary WebUI password in `docker logs qbittorrent`. Set
   the login to `ADMIN_USER`/`ADMIN_PASSWORD` from `shared.env`, or the Homepage
   widget can't log in.
 - Default save path `/downloads/complete`, incomplete `/downloads/incomplete`.

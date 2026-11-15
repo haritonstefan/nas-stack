@@ -71,22 +71,13 @@ has two standing consequences:
 
 ## CLI coverage
 
-The CLI knows pihole exists but never manages its lifecycle (`UNIT_STANDALONE` in
-its unit file — `docs/cli-spec.md` §Code layout):
-
-- `pi-hole/.env` — copied from `pi-hole/.env.example` and filled in by hand; no
-  verb creates or edits it. `PIHOLE_PASSWORD` is its own credential, never the
-  shared `ADMIN_PASSWORD` (P4).
-- `nas status` — container state over the docker socket, `pi-hole/.env` presence.
-- `nas logs pihole` — plain `docker logs pihole`.
-- `nas doctor` — DNS answering probed via `docker exec` from inside the container
-  (**verify** the image ships a resolver client); the NAS cannot reach
-  `192.168.0.53` (macvlan), so the LAN-side check is printed as a command for a
-  client, never attempted locally.
-- `nas install|destroy|recreate pihole` — refused, pointing at the
-  standalone bring-up: `cd pi-hole && sudo docker compose up -d` / `down`. Lifecycle
-  integration would make the macvlan network script-managed like `nas-net`; this
-  spec gets revisited if that ever happens.
+None. `./nas` doesn't know pihole exists. Its lifecycle is
+`cd pi-hole && sudo docker compose up -d` / `down`, and `pi-hole/.env` is copied from
+`pi-hole/.env.example` and filled in by hand. `PIHOLE_PASSWORD` is its own credential,
+never the shared `ADMIN_PASSWORD` (P4). The NAS can't reach `192.168.0.53` (macvlan), so
+check DNS from a LAN client: `dig @192.168.0.53 example.com`. Lifecycle integration would
+make the macvlan network script-managed like `nas-net`; this spec gets revisited if that
+ever happens.
 
 ## Explicitly out of scope
 

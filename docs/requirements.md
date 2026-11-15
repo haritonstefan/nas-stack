@@ -5,7 +5,7 @@ The as-built record of the system, and the reasoning behind it, is
 
 ## Vision
 
-This repo manages the NAS. One CLI (`./nas`) installs, destroys and recreates apps on
+This repo manages the NAS. One small CLI (`./nas`) installs and destroys apps on
 `apollo.local`, individually, without ever taking down the rest of the stack. A fresh
 clone, one install run, the `.env` files filled in and a second install run reproduce
 every container and its wiring. What lives inside each service is set up by hand in its
@@ -13,16 +13,15 @@ own UI (`docs/manual-setup.md`).
 
 ## Goals
 
-1. **Single entrypoint.** All lifecycle operations go through `./nas` (spec:
-   `docs/cli-spec.md`).
-2. **Per-app lifecycle.** Install, destroy and recreate operate on one unit at a time by
+1. **Single entrypoint.** All lifecycle operations go through `./nas`.
+2. **Per-app lifecycle.** Install and destroy operate on one unit at a time by
    default. Destroying `radarr` must not disturb `sonarr`, `nas-net`, or any other unit's
    API keys — a hard requirement to preserve.
 3. **Wiring in code, service setup by hand.** The repo owns everything outside a
    service: network, mounts, ports, identities, API keys, dashboard tiles. Inside a
    service, its own UI is the source of truth.
-4. **PiHole, standalone.** The CLI covers it via the read-only verbs; its lifecycle
-   stays its own two-command compose (spec: `docs/pihole-spec.md` §CLI coverage).
+4. **PiHole, standalone.** The CLI doesn't know it; its lifecycle is its own
+   two-command compose (spec: `docs/pihole-spec.md` §CLI coverage).
 5. **Lean documentation**, per the policy below.
 
 ## Non-goals
@@ -39,8 +38,8 @@ own UI (`docs/manual-setup.md`).
 ## Scope: the units
 
 Ten managed units, each a self-contained `docker-compose.<unit>.yml` + `<unit>.env`
-pair, plus standalone pihole. The per-unit data the CLI drives them with (dirs,
-templates, ports, keys, delete targets) is tabulated in `docs/units.md`:
+pair, plus standalone pihole. The CLI drives them by naming convention (`CLAUDE.md`
+§Files):
 
 | Unit | Role |
 |---|---|
@@ -54,8 +53,8 @@ templates, ports, keys, delete targets) is tabulated in `docs/units.md`:
 | unmanic | post-import audio/subtitle cleanup |
 | pihole | DNS ad-blocking, standalone (`docs/pihole-spec.md`) |
 
-`core` and `arr` are selection aliases only (`core` → homepage, `arr` → sonarr, radarr,
-lidarr, prowlarr, qbittorrent, seerr, byparr).
+`arr` is a selection alias only (sonarr, radarr, lidarr, prowlarr, qbittorrent, seerr,
+byparr).
 
 ## Hard requirements
 
@@ -80,21 +79,17 @@ rather than renumbering the rest.
   prompt is never the only path: without a TTY, a verb either proceeds on a flag
   (`--yes`) or refuses with a clear exit code.
 - **R7 — Cross-unit knowledge lives in the CLI only.** Compose files stay ignorant of each
-  other: no `depends_on`, no shared volumes, `nas-net` script-managed. The aliases, the
-  processing order and the qBittorrent sparing rule live in the CLI core, never in a
-  compose file or a unit file.
+  other: no `depends_on`, no shared volumes, `nas-net` script-managed. The aliases and
+  the qBittorrent sparing rule live in the CLI, never in a compose file.
 - **R9 — Live-NAS discipline.** GET-only probing, dry-run before mutating, logs collected
   before any wipe, exact image pins. (These are operator rules as much as CLI rules; the
-  CLI encodes them where it can — e.g. `destroy` offers to save logs first.)
+  CLI encodes them where it can — e.g. `destroy` always saves logs first.)
 
 ## CLI requirements
 
-- **N1 — One CLI, subcommand per operation:** `install`, `destroy`, `recreate`, `status`,
-  `logs`, `doctor` (`update` reserved, undesigned). Full behavior in `docs/cli-spec.md`.
-- **N4 — `status` tells the truth per unit, cheaply:** not installed / created /
-  running / exited, plus whether the unit's `.env` exists and whether its config
-  templates drifted from the repo copies. Filesystem, docker socket and TCP probes
-  only — never a service-API call.
+- **N1 — As small as the guarantees allow:** `install`, `destroy`, and `compose` (plain
+  `docker compose` with the unit's project and env files, for everything else: logs,
+  status, restarts). Behavior is in `./nas --help`.
 
 ## Documentation policy
 
@@ -110,8 +105,3 @@ rather than renumbering the rest.
 - Decisions are recorded as their outcome, never as decision trees. Rejected
   alternatives and "earlier drafts did X" narration are deleted; a question is either
   listed under Open questions or resolved and gone.
-
-## Open questions
-
-- Whether `nas update <unit>` (bump an image pin, recreate) deserves to be a verb or
-  stays a manual edit + `recreate`. Deferred.
