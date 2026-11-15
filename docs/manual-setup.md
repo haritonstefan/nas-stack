@@ -85,7 +85,7 @@ host-networked, so anything that talks to it uses `LAN_HOST`
   sudo ./nas compose runner run --rm runner register --non-interactive \
     --url https://gitlab.com --token glrt-... --executor docker \
     --description apollo --docker-image alpine:3.24.4 \
-    --docker-cpus 4 --docker-memory 1536m --docker-pull-policy if-not-present \
+    --docker-cpus 4 --docker-memory 2g --docker-pull-policy if-not-present \
     --docker-volumes /volume2/docker/runner/cache:/cache
   ```
 
@@ -94,9 +94,14 @@ host-networked, so anything that talks to it uses `LAN_HOST`
 
 - `register` writes `concurrent = 1`, and has no flag for it. Raise it to 3:
   `sudo sed -i 's/^concurrent = 1$/concurrent = 3/' /volume2/docker/runner/config/config.toml`.
-  Three jobs × 1.5 GB leaves Jellyfin and the rest about 3.5 GB of the 8.
+  Three jobs × 2 GB leaves Jellyfin and the rest about 2 GB of the 8.
   `cpus` is a per-job cap, not a reservation: the three jobs share the 6
   cores. A job killed with exit code 137 hit the memory cap.
+- Node sizes its default heap well below the 2 GB cap, so a big lint or build
+  dies with `JavaScript heap out of memory` while the container has room left.
+  Such jobs set `NODE_OPTIONS: "--max-old-space-size=1536"` in their
+  `.gitlab-ci.yml`. Not 2048: Node needs room outside the heap, and hitting the
+  cap is a 137 kill instead of a readable error.
 - **Never** set `privileged = true` in `config.toml`, and never add
   `/var/run/docker.sock`, `/volume1` or the download tree to its `volumes`.
   Each one hands every job root on the NAS or its data (spec §8). The cache

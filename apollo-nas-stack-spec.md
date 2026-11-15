@@ -414,8 +414,9 @@ polls gitlab.com for jobs. Registration and job limits are set by hand
   instance or top-level group runners.
 - **Jobs stay off `nas-net`.** They run on Docker's default bridge, so job code can't
   reach the other containers by name.
-- **Three jobs at a time, each capped at 4 CPUs / 1.5 GB.** The box has 6 cores and 8 GB,
-  shared with Jellyfin; three jobs take at most 4.5 GB. Job data lands in the Docker data
+- **Three jobs at a time, each capped at 4 CPUs / 2 GB.** The box has 6 cores and 8 GB,
+  shared with Jellyfin; three jobs take at most 6 GB. 1.5 GB was too little for
+  type-aware ESLint. Job data lands in the Docker data
   root, `/volume2/@docker`, so CI never spins up the HDD.
 - **One cache dir for all slots.** By default the runner keeps a cache volume per
   concurrent slot (`runner-…-project-<id>-concurrent-<n>`), and `cache_dir` splits by slot
